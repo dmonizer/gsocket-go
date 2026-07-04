@@ -170,18 +170,18 @@ escape-sequence parser.
 
 | Feature | C | Go |
 |---|---|---|
-| Multiple simultaneous connections (server side) | ✅ | ❌ — sequential only |
-| Multiple inbound TCP connections (client side, `-p`) | ✅ | ⚠️ — accepts many, one GS tunnel |
+| Multiple simultaneous connections (server side) | ✅ | ✅ — goroutine per session |
+| Multiple inbound TCP connections (client side, `-p`) | ✅ | ✅ — own GS tunnel per connection |
 | Per-peer ID tracking & `peer_count` | ✅ | ❌ |
 | Inter-peer IDS notification — login/logout events | ✅ | ❌ |
-| Graceful per-peer shutdown without killing other peers | ✅ | ❌ — `Close()` tears down everything |
+| Graceful per-peer shutdown without killing other peers | ✅ | ✅ — independent goroutines |
 | `GS_FL_SINGLE_SHOT` — accept one connection then stop | ✅ | ❌ |
 | Peers indexed by fd in global array | ✅ | ❌ |
 
-In the C implementation the server loops, accepting unlimited peers
-concurrently with `select()` multiplexing across all fd sets. The Go server
-loop in `runListener()` is strictly sequential: accept → handle → wait 10 s
-→ repeat. Only one peer at a time.
+The Go server spawns each accepted client session in its own goroutine,
+allowing unlimited concurrent connections. The client `-p` multi-peer mode
+creates a dedicated GS tunnel per inbound TCP connection. Shutdown waits
+for active sessions (30 s timeout) before exiting.
 
 ---
 
@@ -220,10 +220,10 @@ ordering, and integration with the `select()` loop for timing.
 
 | Feature | C | Go |
 |---|---|---|
-| UDP transport (`-u`) | ✅ | ❌ |
-| UDP packet framing — 16-bit length prefix over TCP | ✅ | ❌ |
+| UDP transport (`-u`) | ✅ | ✅ |
+| UDP packet framing — 16-bit length prefix over TCP | ✅ | ✅ |
 | UDP-specific idle timeout | ✅ | ❌ |
-| `recvfrom()` + `connect()` for UDP peer pinning | ✅ | ❌ |
+| `recvfrom()` + `connect()` for UDP peer pinning | ✅ | ✅ — ReadFromUDP + DialUDP |
 
 ---
 
@@ -319,15 +319,15 @@ ordering, and integration with the `select()` loop for timing.
 | App protocol parser | **60%** | Parsing works; zero callbacks wired into `Peer` |
 | File transfer | **5%** | Only channel-type constants defined |
 | SOCKS5 | **100%** | Client + server; env vars; TOR |
-| Multi-peer | **20%** | Sequential accept only |
+| Multi-peer | **70%** | Goroutine-per-session; missing ID tracking, single-shot |
 | Daemon / watchdog | **0%** | Not implemented |
 | Event / timer system | **10%** | GSRN ping ticker only |
-| UDP | **0%** | Not implemented |
+| UDP | **80%** | Framing + forwarding; missing idle timeout |
 | IDS | **0%** | Not implemented |
 | Statistics / logging | **20%** | Byte counters only; no formatting, rates, or logs |
 | Tests | **100%** | 25+ tests covering protocol, crypto, and appproto |
 | Portability | **100%** | Pure Go → Linux, macOS, Windows native |
-| **OVERALL** | **~45%** | Core happy path works; production features missing |
+| **OVERALL** | **~57%** | Core + SOCKS5 + multi-peer + UDP complete |
 
 ---
 
@@ -338,14 +338,12 @@ ordering, and integration with the `select()` loop for timing.
 | Wire up appproto callbacks in Peer (WSIZE, PING/PONG, LOG, STATUS, PWD) | Small (1-2 days) |
 | SIGWINCH handler → WSIZE message | Small |
 | Log to file (`-L`), quiet mode, env-var GSRN opts | Small |
-| Multi-peer server (concurrent accept loop + per-peer goroutines) | Medium |
 | Multi-sox backlog for faster re-accept | Medium |
 | Auto-reconnect & DNS re-resolution | Medium |
 | Daemon + watchdog mode | Medium |
 | Statistics formatting & disconnect summary | Medium |
 | File transfer engine (PUT/GET/LIST/globbing/resume) | **Large** |
 | Console system (status bar, Ctrl-E commands) | **Large** |
-| UDP support | Medium |
 | IDS subsystem (utmp monitoring + peer notifications) | Medium |
 | Event manager | Medium |
-| Remaining CLI flags (`-k`, `-t`, `-g`, `-r`, `-C`, `-u`) | Small–Medium |
+| Remaining CLI flags (`-k`, `-t`, `-g`, `-r`, `-C`) | Small–Medium |

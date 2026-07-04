@@ -2,7 +2,9 @@ package gsocket
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -40,6 +42,7 @@ type Peer struct {
 	interactive   bool
 	socksServer   bool
 	multiPeer     bool   // accept multiple connections (server + client -p)
+	isUDP         bool   // use UDP transport with length-prefix framing
 	socksProxyAddr string // SOCKS5 proxy address for GSRN connections
 	logger        *log.Logger
 
@@ -48,6 +51,10 @@ type Peer struct {
 	running   bool
 	done      chan struct{}
 	closeOnce sync.Once
+
+	// UDP unstack buffer — accumulates framed TCP data until a
+	// complete datagram is available (matches C udp_unstack).
+	udpBuf bytes.Buffer
 
 	// Statistics.
 	bytesRead    int64
@@ -83,6 +90,13 @@ func WithInteractive() PeerOption {
 // requested target. Use with -l (listen/server mode).
 func WithSOCKSServer() PeerOption {
 	return func(p *Peer) { p.socksServer = true }
+}
+
+// WithUDP enables UDP transport mode. Data is framed with a 16-bit
+// length prefix over the TCP tunnel, matching the C implementation's
+// udp_unstack / wrap mechanism. Use with -p for port forwarding.
+func WithUDP() PeerOption {
+	return func(p *Peer) { p.isUDP = true }
 }
 
 // WithMultiPeer enables accepting multiple connections. On the server side
@@ -203,8 +217,14 @@ func (p *Peer) RunShell() error {
 		return fmt.Errorf("peer not connected")
 	}
 
+	// Client-side: listen on local port and forward to GS tunnel.
 	if p.listenAddr != "" {
 		return p.forwardLocalPort()
+	}
+
+	// Server-side: forward GS tunnel to a fixed target (-d addr:port).
+	if p.targetAddr != "" && p.role == RoleServer {
+		return p.forwardToTarget()
 	}
 
 	// SOCKS5 server mode: after the tunnel is established, act as a
@@ -448,10 +468,39 @@ func (p *Peer) runClientInteractive() error {
 	}
 }
 
+// forwardToTarget connects to a fixed target address and relays data
+// between it and the GS tunnel. Used on the server side (-d addr:port).
+// Supports TCP and UDP.
+func (p *Peer) forwardToTarget() error {
+	network := "tcp"
+	if p.isUDP {
+		network = "udp"
+	}
+
+	target, err := net.Dial(network, p.targetAddr)
+	if err != nil {
+		return fmt.Errorf("connect to %s: %w", p.targetAddr, err)
+	}
+	defer target.Close()
+
+	p.logger.Printf("Forwarding GS tunnel to %s [%s]", p.targetAddr, network)
+
+	// Relay between channel and target. relayConn handles both TCP
+	// (straight copy) and UDP (length-prefix framing).
+	p.relayConn(target)
+	return nil
+}
+
 // forwardLocalPort listens on a local port and forwards connections
 // through the GS tunnel. In multi-peer mode each incoming TCP connection
 // gets its own GS tunnel; otherwise all connections share one tunnel.
 func (p *Peer) forwardLocalPort() error {
+	// UDP mode: listen on UDP, relay all datagrams through the single
+	// GS tunnel with length-prefix framing.
+	if p.isUDP {
+		return p.forwardLocalPortUDP()
+	}
+
 	listener, err := net.Listen("tcp", p.listenAddr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", p.listenAddr, err)
@@ -481,6 +530,53 @@ func (p *Peer) forwardLocalPort() error {
 			go p.relayConn(conn)
 		}
 	}
+}
+
+// forwardLocalPortUDP listens on a UDP port and relays datagrams through
+// the GS tunnel with length-prefix framing. Only one UDP "connection" is
+// supported at a time — the first peer to send a datagram is pinned via
+// connect(), matching the C implementation's recvfrom + connect pattern.
+func (p *Peer) forwardLocalPortUDP() error {
+	addr, err := net.ResolveUDPAddr("udp", p.listenAddr)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", p.listenAddr, err)
+	}
+
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return fmt.Errorf("listen UDP on %s: %w", p.listenAddr, err)
+	}
+	defer conn.Close()
+
+	p.logger.Printf("UDP forwarding on %s through GS tunnel", p.listenAddr)
+
+	// Read one datagram to discover the peer, then "connect" to pin the
+	// socket to that peer (matches C recvfrom + connect pattern).
+	buf := make([]byte, 65535)
+	n, peerAddr, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		return fmt.Errorf("UDP read: %w", err)
+	}
+	if err := conn.Close(); err != nil {
+		return err
+	}
+
+	// Create a connected UDP socket pinned to the peer.
+	peerConn, err := net.DialUDP("udp", nil, peerAddr)
+	if err != nil {
+		return fmt.Errorf("UDP connect to peer %s: %w", peerAddr, err)
+	}
+	defer peerConn.Close()
+
+	p.logger.Printf("UDP peer connected: %s", peerAddr)
+
+	// Replay the first datagram we already buffered.
+	if _, err := peerConn.Write(buf[:n]); err != nil {
+		return fmt.Errorf("UDP replay write: %w", err)
+	}
+
+	p.relayConn(peerConn)
+	return nil
 }
 
 // handleMultiPeerConn creates a new GS tunnel for an incoming TCP
@@ -520,26 +616,93 @@ func (p *Peer) handleMultiPeerConn(local net.Conn) {
 	wg.Wait()
 }
 
-// relayConn copies data between a local TCP connection and the secure channel.
+// relayConn copies data between a local TCP connection and the secure
+// channel. In UDP mode each read from the local socket is prefixed with a
+// 2-byte length before being written to the channel; data read from the
+// channel is unbuffered via udpUnstack before being written to the socket.
 func (p *Peer) relayConn(local net.Conn) {
 	defer local.Close()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	go func() {
-		defer wg.Done()
-		io.Copy(p.channel, local)
-		p.Close()
-	}()
+	if p.isUDP {
+		// Local → Channel: read datagram, prepend 2-byte length.
+		go func() {
+			defer wg.Done()
+			defer p.Close()
+			buf := make([]byte, 65535)
+			for {
+				n, err := local.Read(buf)
+				if n > 0 {
+					framed := wrapUDP(buf[:n])
+					if _, werr := p.channel.Write(framed); werr != nil {
+						return
+					}
+					p.mu.Lock()
+					p.bytesWritten += int64(n)
+					p.mu.Unlock()
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
 
-	go func() {
-		defer wg.Done()
-		io.Copy(local, p.channel)
-		p.Close()
-	}()
+		// Channel → Local: unstack framed datagrams.
+		go func() {
+			defer wg.Done()
+			defer p.Close()
+			buf := make([]byte, 8192)
+			for {
+				n, err := p.channel.Read(buf)
+				if n > 0 {
+					p.mu.Lock()
+					p.udpBuf.Write(buf[:n])
+					for p.udpBuf.Len() >= 2 {
+						raw := p.udpBuf.Bytes()
+						dlen := int(binary.BigEndian.Uint16(raw[:2]))
+						if p.udpBuf.Len() < 2+dlen {
+							break // need more data
+						}
+						p.udpBuf.Next(2) // consume length prefix
+						payload := make([]byte, dlen)
+						p.udpBuf.Read(payload)
+						local.Write(payload)
+						p.bytesRead += int64(dlen)
+					}
+					p.mu.Unlock()
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	} else {
+		// TCP mode: straight io.Copy.
+		go func() {
+			defer wg.Done()
+			io.Copy(p.channel, local)
+			p.Close()
+		}()
+
+		go func() {
+			defer wg.Done()
+			io.Copy(local, p.channel)
+			p.Close()
+		}()
+	}
 
 	wg.Wait()
+}
+
+// wrapUDP prepends a 2-byte big-endian length prefix to data for UDP
+// framing over the TCP tunnel. Matches the C implementation.
+func wrapUDP(data []byte) []byte {
+	framed := make([]byte, 2+len(data))
+	binary.BigEndian.PutUint16(framed[:2], uint16(len(data)))
+	copy(framed[2:], data)
+	return framed
 }
 
 // Channel returns the secure channel for direct read/write access.
