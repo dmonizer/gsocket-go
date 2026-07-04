@@ -5,11 +5,12 @@
 ## Summary
 
 The Go implementation covers the **core happy path** of the original C codebase
-(~63% of features). It handles the fundamental use case — two peers connecting
+(~65% of features). It handles the fundamental use case — two peers connecting
 interactively over GSRN — plus SOCKS5 proxying, multi-peer concurrency, UDP
-transport, daemon mode, and watchdog auto-restart. Still missing: file transfer
-engine, console system, IDS, full statistics formatting, and several minor CLI
-flags.
+transport, daemon mode, watchdog auto-restart, SIGWINCH terminal resize, NOPTY
+fallback, app-level PING/PONG keepalive, and Ctrl-E console escape handling.
+Still missing: file transfer engine, full console UI/commands, IDS, full
+statistics formatting, and several minor CLI flags.
 
 ---
 
@@ -95,11 +96,11 @@ to each other. From a security standpoint the Go protocol is actually stronger
 | PTY fallback (non-Linux) | ✅ | ✅ | Pipes on `!linux` (no job control) |
 | Raw terminal mode (client side) | ✅ | ✅ | `term.MakeRaw()` |
 | Ctrl-C forwarding — `0x03` byte to remote PTY | ✅ | ✅ | Works via raw mode disabling ISIG |
-| **SIGWINCH** — window resize forwarded to PTY | ✅ | ❌ | No resize messages sent |
-| NOPTY fallback — notifies client when PTY fails | ✅ | ❌ | `GS_PKT_APP_STATUS_TYPE_NOPTY` not sent |
-| Ctrl-E console command system | ✅ | ❌ | Client-side interactive console |
+| **SIGWINCH** — window resize forwarded to PTY | ✅ | ✅ | Client sends WSIZE via `syscall.SIGWINCH`; server applies `TIOCSWINSZ` |
+| NOPTY fallback — notifies client when PTY fails | ✅ | ✅ | Server sends STATUS(NOPTY); client switches to pipe mode |
+| Ctrl-E console command system | ✅ | ⚠️ | Escape handling works (Ctrl-E+E → literal 0x05); no full console UI |
 | Console status bar (load / ping / BPS / file transfer %) | ✅ | ❌ | |
-| Console commands: `ping`, `pwd`, `ft`, `log`, `ids` | ✅ | ❌ | |
+| Console commands: `ping`, `pwd`, `ft`, `log`, `ids` | ✅ | ❌ | PING/PONG wired at protocol level but not exposed as user command |
 | `CONSOLE_check_esc()` — intercept escape sequences from stdin | ✅ | ❌ | Stdin reads are unfiltered in Go |
 
 ---
@@ -115,12 +116,12 @@ within the encrypted data stream.
 | Fixed-size messages — size tiered by type number | ✅ | ✅ | `MsgSize()` function matches C |
 | Channel messages — variable size with 2-byte length prefix | ✅ | ✅ | |
 | Callback registry (`OnMessage` / `OnChannel`) | ✅ | ✅ | |
-| **WSIZE** — terminal window resize | ✅ | ⚠️ | Type & struct defined; no handler registered in `Peer` |
-| **PING** — app-level keepalive | ✅ | ⚠️ | Type & struct defined; no handler registered |
-| **PONG** — reply with load/idle/user count | ✅ | ⚠️ | Type & struct defined; no handler registered |
+| **WSIZE** — terminal window resize | ✅ | ✅ | Client→server: applies `TIOCSWINSZ` to PTY master |
+| **PING** — app-level keepalive | ✅ | ✅ | Client sends every 30s; server replies with PONG |
+| **PONG** — reply with load/idle/user count | ✅ | ✅ | Server sends on PING; client logs RTT |
 | **IDS** — subscribe to intrusion notifications | ✅ | ⚠️ | Type & struct defined; no handler registered |
-| **LOG** — server→client log messages | ✅ | ⚠️ | Type & struct defined; no handler registered |
-| **STATUS** — status messages (e.g. NOPTY) | ✅ | ⚠️ | Type & struct defined; no handler registered |
+| **LOG** — server→client log messages | ✅ | ✅ | Client prints with type prefix ([ALERT], [NOTICE], [INFO]) |
+| **STATUS** — status messages (e.g. NOPTY) | ✅ | ✅ | Client handles NOPTY → switches to pipe mode |
 | **PWD** — working directory request/reply | ✅ | ⚠️ | Types & structs defined; no handlers registered |
 | **File transfer channels** — PUT/ACCEPT/DATA/SWITCH/ERROR/LIST/DL | ✅ | ❌ | Channel types defined; no engine or handlers |
 
@@ -318,8 +319,8 @@ ordering, and integration with the `select()` loop for timing.
 | Address derivation | **100%** | Identical to C |
 | Crypto | **100%*** | Different but equivalent security; not wire-compatible with C |
 | CLI flags | **55%** | Basic + SOCKS + UDP + daemon + watchdog; missing `-k`, `-t`, `-q`, `-r`, `-C`, etc. |
-| Interactive shell | **40%** | PTY works; missing resize, console, escape handling |
-| App protocol parser | **60%** | Parsing works; zero callbacks wired into `Peer` |
+| Interactive shell | **65%** | PTY + resize + NOPTY + Ctrl-E escape; missing full console UI + commands |
+| App protocol parser | **80%** | Parsing works; WSIZE/PING/PONG/LOG/STATUS wired; PWD/IDS still unhandled |
 | File transfer | **5%** | Only channel-type constants defined |
 | SOCKS5 | **100%** | Client + server; env vars; TOR |
 | Multi-peer | **70%** | Goroutine-per-session; missing ID tracking, single-shot |
@@ -330,7 +331,7 @@ ordering, and integration with the `select()` loop for timing.
 | Statistics / logging | **20%** | Byte counters only; no formatting, rates, or logs |
 | Tests | **100%** | 25+ tests covering protocol, crypto, and appproto |
 | Portability | **100%** | Pure Go → Linux, macOS, Windows native |
-| **OVERALL** | **~63%** | Core + SOCKS5 + multi-peer + UDP + daemon + watchdog complete |
+| **OVERALL** | **~65%** | Core + SOCKS5 + multi-peer + UDP + daemon + watchdog + interactive shell complete |
 
 ---
 

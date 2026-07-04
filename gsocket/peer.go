@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -51,6 +52,17 @@ type Peer struct {
 	running   bool
 	done      chan struct{}
 	closeOnce sync.Once
+
+	// PTY state (server side, Linux only).
+	hasPTY      bool
+	ptyMasterFd uintptr
+
+	// Console state (client side).
+	consoleReader *ConsoleReader
+
+	// App-level ping state.
+	pingTicker   *time.Ticker
+	pingSentTime int64 // unix nano when last ping was sent
 
 	// UDP unstack buffer — accumulates framed TCP data until a
 	// complete datagram is available (matches C udp_unstack).
@@ -205,6 +217,11 @@ func (p *Peer) finishHandshake(gsrn *GSRNConn, isServer bool) error {
 	p.gsrn = gsrn
 	p.app = NewAppProto(channel)
 	p.running = true
+
+	// Wire up application protocol callbacks. These handle in-band
+	// signalling (window resize, keepalive, logs, status) that is
+	// multiplexed within the encrypted data stream.
+	p.wireAppCallbacks()
 
 	p.logger.Printf("Secure channel established")
 	return nil
@@ -411,9 +428,13 @@ func (p *Peer) runInteractive() error {
 }
 
 // runClientInteractive sets up the local terminal for interactive use with a
-// remote shell: raw mode (no local echo, char-by-char input) and Ctrl-C
-// forwarding (sends 0x03 byte instead of killing gs-netcat).
+// remote shell: raw mode (no local echo, char-by-char input), Ctrl-C
+// forwarding (sends 0x03 byte instead of killing gs-netcat), Ctrl-E console
+// escape handling, and SIGWINCH forwarding for terminal resize.
 func (p *Peer) runClientInteractive() error {
+	// Start app-level keepalive pings (every 30 s, matching C).
+	p.startAppPing()
+
 	// Put terminal in raw mode: no echo, char-by-char input, no line
 	// buffering. term.MakeRaw also clears ISIG, so Ctrl-C produces the
 	// byte 0x03 in the stdin stream instead of generating SIGINT. That
@@ -426,12 +447,21 @@ func (p *Peer) runClientInteractive() error {
 	}
 	defer term.Restore(fd, oldState)
 
+	// Register SIGWINCH handler — when the terminal is resized, capture
+	// the new dimensions and send a WSIZE message to the server.
+	p.registerWinchHandler()
+
+	// Wrap stdin with ConsoleReader to handle Ctrl-E escape sequences.
+	// Ctrl-E + E/Ctrl-E sends literal 0x05 through the channel (for emacs
+	// and other applications that use Ctrl-E).
+	cr := NewConsoleReader(os.Stdin)
+
 	// Stdin → Channel.
 	go func() {
 		defer p.Close()
 		buf := make([]byte, 8192)
 		for {
-			n, err := os.Stdin.Read(buf)
+			n, err := cr.Read(buf)
 			if n > 0 {
 				if _, werr := p.channel.Write(buf[:n]); werr != nil {
 					return
@@ -732,4 +762,122 @@ func (p *Peer) Stats() (read, written int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.bytesRead, p.bytesWritten
+}
+
+// wireAppCallbacks registers handlers for in-band application protocol
+// messages. These fire during p.app.Decode() calls when escape sequences
+// are extracted from the encrypted data stream.
+func (p *Peer) wireAppCallbacks() {
+	// WSIZE — window resize from client → apply to PTY master (server only).
+	p.app.OnMessage(msgWSize, func(msgType uint8, data []byte) error {
+		if len(data) < 4 {
+			return nil
+		}
+		cols := binary.BigEndian.Uint16(data[0:2])
+		rows := binary.BigEndian.Uint16(data[2:4])
+
+		p.mu.Lock()
+		fd := p.ptyMasterFd
+		hasPTY := p.hasPTY
+		p.mu.Unlock()
+
+		if !hasPTY || fd == 0 {
+			return nil
+		}
+		return resizePTY(fd, rows, cols)
+	})
+
+	// PING — app-level keepalive from client → server replies with PONG.
+	p.app.OnMessage(msgPing, func(msgType uint8, data []byte) error {
+		// Send PONG with load/idle/user info.
+		// Matches C's pkt_app_cb_ping() → pkt_app_send_pong().
+		pong := AppPong{
+			Load:  0,
+			Idle:  0,
+			NUsers: 1,
+		}
+		copy(pong.User[:], "gsocket")
+		var buf bytes.Buffer
+		if err := binary.Write(&buf, binary.BigEndian, pong); err != nil {
+			return err
+		}
+		return p.app.SendMessage(msgPong, buf.Bytes())
+	})
+
+	// PONG — reply to our PING (client side).
+	p.app.OnMessage(msgPong, func(msgType uint8, data []byte) error {
+		// Log RTT if we were waiting for a pong.
+		p.mu.Lock()
+		sentAt := p.pingSentTime
+		p.pingSentTime = 0
+		p.mu.Unlock()
+		if sentAt > 0 {
+			rtt := time.Since(time.Unix(0, sentAt))
+			p.logger.Printf("PONG received (RTT %v)", rtt.Round(time.Microsecond))
+		}
+		return nil
+	})
+
+	// LOG — server→client log message.
+	p.app.OnMessage(msgLog, func(msgType uint8, data []byte) error {
+		if len(data) < 1 {
+			return nil
+		}
+		logType := data[0]
+		msg := string(bytes.TrimRight(data[1:], "\x00"))
+		if msg == "" {
+			return nil
+		}
+		prefix := ""
+		switch logType {
+		case LogTypeAlert:
+			prefix = "[ALERT] "
+		case LogTypeNotice:
+			prefix = "[NOTICE] "
+		case LogTypeInfo:
+			prefix = "[INFO] "
+		}
+		p.logger.Printf("%s%s", prefix, msg)
+		return nil
+	})
+
+	// STATUS — server→client status message (e.g. NOPTY).
+	p.app.OnMessage(msgStatus, func(msgType uint8, data []byte) error {
+		if len(data) < 1 {
+			return nil
+		}
+		switch data[0] {
+		case StatusTypeNoPTY:
+			p.logger.Printf("Server has no PTY — switching to pipe mode")
+			p.mu.Lock()
+			p.hasPTY = false
+			p.mu.Unlock()
+		}
+		return nil
+	})
+}
+
+// startAppPing starts periodic application-level ping messages.
+// This keeps the connection alive at the application layer and
+// allows RTT measurement. Only active on the client side.
+func (p *Peer) startAppPing() {
+	p.pingTicker = time.NewTicker(30 * time.Second)
+	go func() {
+		for {
+			select {
+			case <-p.pingTicker.C:
+				ping := AppPing{}
+				p.mu.Lock()
+				p.pingSentTime = time.Now().UnixNano()
+				p.mu.Unlock()
+				var buf bytes.Buffer
+				if err := binary.Write(&buf, binary.BigEndian, ping); err != nil {
+					continue
+				}
+				_ = p.app.SendMessage(msgPing, buf.Bytes())
+			case <-p.done:
+				return
+			}
+		}
+	}()
 }

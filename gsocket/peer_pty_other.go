@@ -14,7 +14,19 @@ import (
 // Without a PTY the shell session lacks job control and Ctrl-C may kill
 // gs-netcat rather than foreground tasks inside the shell. For a proper
 // interactive experience use Linux where a PTY is allocated.
+//
+// Sends a NOPTY status message to the client before relaying begins,
+// matching C's pkt_app_send_status_nopty().
 func (p *Peer) runWithPTY(shell string) error {
+	p.hasPTY = false
+
+	// Notify client that we don't have a PTY — client should not expect
+	// WSIZE messages or PTY-specific behavior.
+	status := []byte{StatusTypeNoPTY}
+	if serr := p.app.SendMessage(msgStatus, status); serr != nil {
+		p.logger.Printf("Failed to send NOPTY status: %v", serr)
+	}
+
 	cmd := exec.Command(shell, "-i")
 	cmd.Stderr = cmd.Stdout
 
@@ -64,3 +76,11 @@ func (p *Peer) runWithPTY(shell string) error {
 	cmd.Wait()
 	return nil
 }
+
+// registerWinchHandler is a no-op on non-Linux platforms — there is no
+// SIGWINCH or PTY to resize. PTY allocation is not available on these
+// platforms (see runWithPTY which uses pipes as fallback).
+func (p *Peer) registerWinchHandler() {}
+
+// resizePTY is a no-op on non-Linux — PTY allocation is not available.
+func resizePTY(masterFd uintptr, rows, cols uint16) error { return nil }
