@@ -90,28 +90,30 @@ func reexecAsDaemon() {
 	}
 	defer m.Disconnect()
 
+	// Build the full command line (binary + all args except -D).
+	// This is stored as the service's binary path — no need to pass
+	// separate start args to s.Start().
+	cmd := fmt.Sprintf(`"%s" %s`, exePath, strings.Join(svcArgs, " "))
+
 	// Check if service already exists.
 	s, err := m.OpenService(serviceName)
 	if err == nil {
-		// Service exists — try to start it.
 		s.Close()
 		fmt.Fprintf(os.Stderr, "%s: service '%s' already installed, starting...\n", appName, serviceName)
-		if err := startService(m, serviceName, svcArgs); err != nil {
+		if err := startService(m, serviceName); err != nil {
 			log.Fatalf("daemon: %v", err)
 		}
 		os.Exit(0)
 	}
 
 	// Create the service.
-	cmd := fmt.Sprintf(`"%s" %s`, exePath, strings.Join(svcArgs, " "))
 	s, err = m.CreateService(
 		serviceName,
 		cmd,
 		mgr.Config{
-			DisplayName:      serviceName,
-			Description:      serviceDesc,
-			StartType:        mgr.StartAutomatic,
-			ServiceStartName: "LocalSystem",
+			DisplayName: serviceName,
+			Description: serviceDesc,
+			StartType:   mgr.StartAutomatic,
 		},
 	)
 	if err != nil {
@@ -121,26 +123,20 @@ func reexecAsDaemon() {
 
 	fmt.Fprintf(os.Stderr, "%s: service '%s' installed, starting...\n", appName, serviceName)
 
-	if err := startService(m, serviceName, svcArgs); err != nil {
+	if err := startService(m, serviceName); err != nil {
 		log.Fatalf("daemon: %v", err)
 	}
 	os.Exit(0)
 }
 
-func startService(m *mgr.Mgr, name string, args []string) error {
+func startService(m *mgr.Mgr, name string) error {
 	s, err := m.OpenService(name)
 	if err != nil {
 		return fmt.Errorf("open service: %w", err)
 	}
 	defer s.Close()
 
-	// Set startup args (binary path + extra args as start params).
-	// The service's Execute(args) receives these.
-	if len(args) > 0 {
-		err = s.Start(args...)
-	} else {
-		err = s.Start()
-	}
+	err = s.Start()
 	if err != nil {
 		// Already running is OK.
 		if strings.Contains(err.Error(), "already been started") ||
