@@ -39,6 +39,7 @@ type Peer struct {
 	execCmd       string
 	interactive   bool
 	socksServer   bool
+	multiPeer     bool   // accept multiple connections (server + client -p)
 	socksProxyAddr string // SOCKS5 proxy address for GSRN connections
 	logger        *log.Logger
 
@@ -82,6 +83,14 @@ func WithInteractive() PeerOption {
 // requested target. Use with -l (listen/server mode).
 func WithSOCKSServer() PeerOption {
 	return func(p *Peer) { p.socksServer = true }
+}
+
+// WithMultiPeer enables accepting multiple connections. On the server side
+// (-l), multiple clients can connect simultaneously. On the client side
+// (-p), each incoming TCP connection gets its own GS tunnel instead of
+// sharing a single tunnel.
+func WithMultiPeer() PeerOption {
+	return func(p *Peer) { p.multiPeer = true }
 }
 
 // WithSOCKS5Proxy sets a SOCKS5 proxy address for the GSRN TCP connection.
@@ -439,8 +448,9 @@ func (p *Peer) runClientInteractive() error {
 	}
 }
 
-// forwardLocalPort listens on a local port and forwards each connection
-// through the secure channel.
+// forwardLocalPort listens on a local port and forwards connections
+// through the GS tunnel. In multi-peer mode each incoming TCP connection
+// gets its own GS tunnel; otherwise all connections share one tunnel.
 func (p *Peer) forwardLocalPort() error {
 	listener, err := net.Listen("tcp", p.listenAddr)
 	if err != nil {
@@ -448,7 +458,11 @@ func (p *Peer) forwardLocalPort() error {
 	}
 	defer listener.Close()
 
-	p.logger.Printf("Forwarding %s through GS tunnel", p.listenAddr)
+	if p.multiPeer {
+		p.logger.Printf("Multi-peer: each connection to %s gets its own GS tunnel", p.listenAddr)
+	} else {
+		p.logger.Printf("Forwarding %s through GS tunnel", p.listenAddr)
+	}
 
 	for {
 		conn, err := listener.Accept()
@@ -461,8 +475,49 @@ func (p *Peer) forwardLocalPort() error {
 				continue
 			}
 		}
-		go p.relayConn(conn)
+		if p.multiPeer {
+			go p.handleMultiPeerConn(conn)
+		} else {
+			go p.relayConn(conn)
+		}
 	}
+}
+
+// handleMultiPeerConn creates a new GS tunnel for an incoming TCP
+// connection and relays data between them. Used in client multi-peer
+// mode (-p without -l) where each incoming connection gets its own
+// encrypted tunnel to the GS server.
+func (p *Peer) handleMultiPeerConn(local net.Conn) {
+	defer local.Close()
+
+	// Create a fresh peer for this connection.
+	cp := NewPeer(p.secret, RoleClient)
+	cp.socksProxyAddr = p.socksProxyAddr
+	cp.logger = p.logger
+
+	if err := cp.DialAndConnect(context.Background()); err != nil {
+		p.logger.Printf("Multi-peer dial failed: %v", err)
+		return
+	}
+	defer cp.Close()
+
+	// Bidirectional relay between local connection and new GS tunnel.
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		io.Copy(cp.channel, local)
+		cp.Close()
+	}()
+
+	go func() {
+		defer wg.Done()
+		io.Copy(local, cp.channel)
+		cp.Close()
+	}()
+
+	wg.Wait()
 }
 
 // relayConn copies data between a local TCP connection and the secure channel.
