@@ -160,8 +160,8 @@ escape-sequence parser.
 |---|---|---|
 | SOCKS5 client — connect through proxy | ✅ | ✅ |
 | TOR integration (`127.0.0.1:9050`) | ✅ | ✅ |
-| `GSOCKET_SOCKS_IP` / `GSOCKET_SOCKS_PORT` env vars | ✅ | ❌ |
-| SOCKS5 server mode (`-S`) | ✅ | ❌ |
+| `GSOCKET_SOCKS_IP` / `GSOCKET_SOCKS_PORT` env vars | ✅ | ✅ |
+| SOCKS5 server mode (`-S`) | ✅ | ✅ |
 | Hostname resolution on GSRN connect via SOCKS5 | ✅ | N/A |
 
 ---
@@ -318,7 +318,7 @@ ordering, and integration with the `select()` loop for timing.
 | Interactive shell | **40%** | PTY works; missing resize, console, escape handling |
 | App protocol parser | **60%** | Parsing works; zero callbacks wired into `Peer` |
 | File transfer | **5%** | Only channel-type constants defined |
-| SOCKS5 | **50%** | Client-side only; no server mode |
+| SOCKS5 | **100%** | Client + server; env vars; TOR |
 | Multi-peer | **20%** | Sequential accept only |
 | Daemon / watchdog | **0%** | Not implemented |
 | Event / timer system | **10%** | GSRN ping ticker only |
@@ -345,8 +345,7 @@ ordering, and integration with the `select()` loop for timing.
 | Statistics formatting & disconnect summary | Medium |
 | File transfer engine (PUT/GET/LIST/globbing/resume) | **Large** |
 | Console system (status bar, Ctrl-E commands) | **Large** |
-| SOCKS5 server mode | Medium |
 | UDP support | Medium |
 | IDS subsystem (utmp monitoring + peer notifications) | Medium |
 | Event manager | Medium |
-| Remaining CLI flags (`-k`, `-t`, `-S`, `-g`, `-r`, `-C`, `-u`) | Small–Medium |
+| Remaining CLI flags (`-k`, `-t`, `-g`, `-r`, `-C`, `-u`) | Small–Medium |
