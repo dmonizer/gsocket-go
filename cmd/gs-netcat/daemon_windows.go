@@ -146,7 +146,15 @@ func reexecAsDaemon() {
 
 	fmt.Fprintf(os.Stderr, "%s: daemon: calling startService('%s')...\n", appName, serviceName)
 	if err := startService(m, serviceName); err != nil {
-		log.Fatalf("daemon: %v", err)
+		// On some Windows versions (notably Win7), s.Start() returns
+		// ACCESS_DENIED even as Administrator. The service IS installed
+		// correctly — just start it manually.
+		fmt.Fprintf(os.Stderr, "%s: daemon: s.Start() returned: %v\n", appName, err)
+		fmt.Fprintf(os.Stderr, "%s: Service '%s' is installed but could not be started automatically.\n", appName, serviceName)
+		fmt.Fprintf(os.Stderr, "%s: Start it manually:\n", appName)
+		fmt.Fprintf(os.Stderr, "%s:   sc start %s\n", appName, serviceName)
+		fmt.Fprintf(os.Stderr, "%s: Or reboot — it's set to StartAutomatic.\n", appName)
+		os.Exit(0)
 	}
 	os.Exit(0)
 }
