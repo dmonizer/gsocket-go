@@ -138,7 +138,7 @@ func (p *Peer) runWithPTY(shell string) error {
 	p.hasPTY = true
 	p.mu.Unlock()
 
-	cmd := exec.Command(shell, "-i")
+	cmd := exec.Command(shell, shellInteractiveArgs()...)
 	cmd.Stdin = ptySlave
 	cmd.Stdout = ptySlave
 	cmd.Stderr = ptySlave
@@ -198,7 +198,7 @@ func (p *Peer) runWithPTY(shell string) error {
 // runWithPipes is the fallback when PTY allocation fails. It uses plain
 // pipes instead of a PTY, matching C's stty_switch_nopty() behavior.
 func (p *Peer) runWithPipes(shell string) error {
-	cmd := exec.Command(shell, "-i")
+	cmd := exec.Command(shell, shellInteractiveArgs()...)
 	cmd.Stderr = cmd.Stdout
 
 	stdinPipe, err := cmd.StdinPipe()

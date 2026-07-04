@@ -413,8 +413,12 @@ func (p *Peer) runRelay() error {
 
 // runExecCmd executes a command specified by -e and connects its stdin/stdout
 // to the encrypted channel. stderr is merged into stdout.
+// Uses the platform-appropriate shell: $SHELL or /bin/sh on Unix,
+// powershell.exe or cmd.exe on Windows.
 func (p *Peer) runExecCmd() error {
-	cmd := exec.Command("/bin/sh", "-c", p.execCmd)
+	sh := shellExec()
+	args := shellExecArgs(p.execCmd)
+	cmd := exec.Command(sh, args...)
 	cmd.Stderr = cmd.Stdout
 
 	stdinPipe, err := cmd.StdinPipe()
@@ -466,12 +470,9 @@ func (p *Peer) runExecCmd() error {
 
 // runInteractive spawns an interactive shell and connects it to the encrypted
 // channel. On Linux, it allocates a PTY for proper terminal handling (job
-// control, Ctrl-C forwarding, etc.).
+// control, Ctrl-C forwarding, etc.). On Windows, uses powershell or cmd.exe.
 func (p *Peer) runInteractive() error {
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
-	}
+	shell := shellInteractive()
 
 	return p.runWithPTY(shell)
 }

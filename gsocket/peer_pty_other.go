@@ -27,7 +27,7 @@ func (p *Peer) runWithPTY(shell string) error {
 		p.logger.Printf("Failed to send NOPTY status: %v", serr)
 	}
 
-	cmd := exec.Command(shell, "-i")
+	cmd := exec.Command(shell, shellInteractiveArgs()...)
 	cmd.Stderr = cmd.Stdout
 
 	stdinPipe, err := cmd.StdinPipe()
