@@ -22,9 +22,10 @@ fail() { echo -e "${RED}FAIL${NC} $*"; exit 1; }
 info() { echo -e "${YELLOW}INFO${NC} $*"; }
 
 TMPDIR=$(mktemp -d)
+SERVER_PID=""; CLIENT_PID=""; NOWAIT_PID=""
 cleanup() {
-    kill $SERVER_PID $CLIENT_PID $NOWAIT_PID 2>/dev/null || true
-    wait $SERVER_PID $CLIENT_PID $NOWAIT_PID 2>/dev/null || true
+    kill ${SERVER_PID:-} ${CLIENT_PID:-} ${NOWAIT_PID:-} 2>/dev/null || true
+    wait ${SERVER_PID:-} ${CLIENT_PID:-} ${NOWAIT_PID:-} 2>/dev/null || true
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
@@ -45,7 +46,7 @@ FAILED=0
 
 # --- Test 1: Without -w, client fails immediately ---
 info "Test 1: Without -w, client fails immediately when no server"
-echo "" | timeout 5 "$GS_NETCAT" -s "$SECRET" >"$TMPDIR/stdout1" 2>"$TMPDIR/stderr1" &
+timeout 5 "$GS_NETCAT" -s "$SECRET" >"$TMPDIR/stdout1" 2>"$TMPDIR/stderr1" &
 NOWAIT_PID=$!
 wait $NOWAIT_PID 2>/dev/null || true
 
@@ -60,8 +61,9 @@ fi
 
 # --- Test 2: -w client prints "Waiting" not just "Connecting" ---
 info "Test 2: -w client prints waiting message"
-# Pipe stdin to prevent the stdin goroutine from blocking on terminal read.
-echo "" | timeout 3 "$GS_NETCAT" -s "$SECRET" -w >"$TMPDIR/stdout2" 2>"$TMPDIR/stderr2" &
+# Use sleep to keep stdin open (prevents early EOF from triggering os.Stdin.Close).
+# The client will be killed by timeout after 3s.
+(sleep 3) | timeout 3 "$GS_NETCAT" -s "$SECRET" -w >"$TMPDIR/stdout2" 2>"$TMPDIR/stderr2" &
 CLIENT_PID=$!
 sleep 1.5
 
@@ -89,7 +91,7 @@ info "Test 3: -w client connects when server starts (GSRN-dependent)"
 # the channel closes. Client is in relay mode (no -e): stdin→channel,
 # channel→stdout. Server output appears on client stdout.
 # This test requires GSRN connectivity. If GSRN is unavailable, skip gracefully.
-(echo ""; sleep 10) | timeout 10 "$GS_NETCAT" -s "$SECRET" -w >"$TMPDIR/stdout3" 2>"$TMPDIR/stderr3" &
+(sleep 10) | timeout 10 "$GS_NETCAT" -s "$SECRET" -w >"$TMPDIR/stdout3" 2>"$TMPDIR/stderr3" &
 CLIENT_PID=$!
 
 # Give client time to start waiting.
