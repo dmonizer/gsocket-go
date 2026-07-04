@@ -453,6 +453,14 @@ func (p *Peer) runExecCmd() error {
 		return fmt.Errorf("start command: %w", err)
 	}
 
+	// Kill command when peer is closed (Ctrl-C on server).
+	go func() {
+		<-p.done
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+	}()
+
 	// Channel → Command stdin.
 	go func() {
 		defer stdinPipe.Close()

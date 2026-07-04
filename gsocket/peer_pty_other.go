@@ -46,9 +46,25 @@ func (p *Peer) runWithPTY(shell string) error {
 		return fmt.Errorf("start shell: %w", err)
 	}
 
-	// Channel → Shell stdin.
+	// When the peer is closed (Ctrl-C or client disconnect), kill the shell.
+	// Without this, io.Copy blocks on stdoutPipe.Read() forever because
+	// closing the channel doesn't unblock the pipe read.
+	go func() {
+		<-p.done
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+	}()
+
+	// Channel → Shell stdin. Detects Ctrl-C (0x03) and kills the shell.
 	go func() {
 		defer stdinPipe.Close()
+		defer func() {
+			// Kill shell when we stop reading from channel (client disconnected).
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+		}()
 		defer p.Close()
 		buf := make([]byte, 8192)
 		for {
@@ -57,6 +73,15 @@ func (p *Peer) runWithPTY(shell string) error {
 				plaintext, derr := p.app.Decode(buf[:n])
 				if derr != nil {
 					return
+				}
+				// On Windows (no PTY), 0x03 is just a byte — it doesn't
+				// generate Ctrl-C. Kill the shell to match expected behavior.
+				for _, b := range plaintext {
+					if b == 0x03 {
+						p.logger.Printf("Ctrl-C received — killing shell")
+						cmd.Process.Kill()
+						return
+					}
 				}
 				if len(plaintext) > 0 {
 					if _, werr := stdinPipe.Write(plaintext); werr != nil {
@@ -73,8 +98,12 @@ func (p *Peer) runWithPTY(shell string) error {
 		}
 	}()
 
-	// Shell stdout → Channel (blocks until shell exits).
+	// Shell stdout → Channel (blocks until shell exits or is killed).
 	io.Copy(p.channel, stdoutPipe)
+	// Ensure shell is dead before we return.
+	if cmd.Process != nil {
+		cmd.Process.Kill()
+	}
 	p.Close()
 	cmd.Wait()
 	return nil

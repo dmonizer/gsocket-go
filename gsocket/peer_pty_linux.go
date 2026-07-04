@@ -161,6 +161,14 @@ func (p *Peer) runWithPTY(shell string) error {
 	// Close our copy of the slave fd — the child owns it now.
 	ptySlave.Close()
 
+	// Kill shell when peer is closed (Ctrl-C on server).
+	go func() {
+		<-p.done
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+	}()
+
 	// Channel → PTY master (remote input → shell stdin).
 	go func() {
 		defer ptyMaster.Close()
@@ -216,9 +224,22 @@ func (p *Peer) runWithPipes(shell string) error {
 		return fmt.Errorf("start shell: %w", err)
 	}
 
+	// Kill shell when peer is closed (Ctrl-C on server).
+	go func() {
+		<-p.done
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+	}()
+
 	// Channel → Shell stdin.
 	go func() {
 		defer stdinPipe.Close()
+		defer func() {
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+		}()
 		defer p.Close()
 		buf := make([]byte, 8192)
 		for {
@@ -227,6 +248,14 @@ func (p *Peer) runWithPipes(shell string) error {
 				plaintext, derr := p.app.Decode(buf[:n])
 				if derr != nil {
 					return
+				}
+				// Ctrl-C (0x03) via pipe → kill shell (no PTY to translate it).
+				for _, b := range plaintext {
+					if b == 0x03 {
+						p.logger.Printf("Ctrl-C received — killing shell")
+						cmd.Process.Kill()
+						return
+					}
 				}
 				if len(plaintext) > 0 {
 					if _, werr := stdinPipe.Write(plaintext); werr != nil {
@@ -243,8 +272,11 @@ func (p *Peer) runWithPipes(shell string) error {
 		}
 	}()
 
-	// Shell stdout → Channel (blocks until shell exits).
+	// Shell stdout → Channel (blocks until shell exits or is killed).
 	io.Copy(p.channel, stdoutPipe)
+	if cmd.Process != nil {
+		cmd.Process.Kill()
+	}
 	p.Close()
 	cmd.Wait()
 	return nil
