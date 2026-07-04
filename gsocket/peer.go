@@ -34,12 +34,13 @@ type Peer struct {
 	app     *AppProto
 
 	// Configuration.
-	targetAddr  string
-	listenAddr  string
-	execCmd     string
-	interactive bool
-	socksServer bool
-	logger      *log.Logger
+	targetAddr    string
+	listenAddr    string
+	execCmd       string
+	interactive   bool
+	socksServer   bool
+	socksProxyAddr string // SOCKS5 proxy address for GSRN connections
+	logger        *log.Logger
 
 	// Internal state.
 	mu        sync.Mutex
@@ -83,6 +84,14 @@ func WithSOCKSServer() PeerOption {
 	return func(p *Peer) { p.socksServer = true }
 }
 
+// WithSOCKS5Proxy sets a SOCKS5 proxy address for the GSRN TCP connection.
+// When set, all GSRN relay traffic is routed through the specified SOCKS5
+// proxy (e.g. "127.0.0.1:9050" for TOR). Both listener and client peers
+// can use a proxy independently.
+func WithSOCKS5Proxy(addr string) PeerOption {
+	return func(p *Peer) { p.socksProxyAddr = addr }
+}
+
 // WithLogger sets the logger for peer diagnostics.
 func WithLogger(l *log.Logger) PeerOption {
 	return func(p *Peer) { p.logger = l }
@@ -105,7 +114,8 @@ func NewPeer(secret string, role PeerRole, opts ...PeerOption) *Peer {
 // AcceptOnListener registers with GSRN as a listener and waits for a client.
 // It blocks until the secure channel is established.
 func (p *Peer) AcceptOnListener(ctx context.Context) error {
-	client, err := NewGSRNClient(p.secret)
+	opts := p.gsrnClientOpts()
+	client, err := NewGSRNClient(p.secret, opts...)
 	if err != nil {
 		return fmt.Errorf("create GSRN client: %w", err)
 	}
@@ -130,7 +140,8 @@ func (p *Peer) AcceptOnListener(ctx context.Context) error {
 // DialAndConnect connects to GSRN as a client and establishes a secure channel.
 // It blocks until the secure channel is established.
 func (p *Peer) DialAndConnect(ctx context.Context) error {
-	client, err := NewGSRNClient(p.secret, WithFlags(flagProtoLowLatency))
+	opts := append(p.gsrnClientOpts(), WithFlags(flagProtoLowLatency))
+	client, err := NewGSRNClient(p.secret, opts...)
 	if err != nil {
 		return fmt.Errorf("create GSRN client: %w", err)
 	}
@@ -143,6 +154,15 @@ func (p *Peer) DialAndConnect(ctx context.Context) error {
 	}
 
 	return p.finishHandshake(gsrn, false)
+}
+
+// gsrnClientOpts builds GSRNClient options from the peer's configuration.
+func (p *Peer) gsrnClientOpts() []GSRNClientOption {
+	var opts []GSRNClientOption
+	if p.socksProxyAddr != "" {
+		opts = append(opts, WithSOCKS5(p.socksProxyAddr))
+	}
+	return opts
 }
 
 // finishHandshake completes the secure channel setup after GSRN connects peers.
