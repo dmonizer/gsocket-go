@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -100,6 +101,8 @@ func winErr(err error) string {
 }
 
 // reexecAsDaemon installs and starts gs-netcat as a Windows service.
+// If the binary is in a user directory (e.g. Desktop), it copies itself
+// to C:\gs-netcat\ first — LocalSystem can't access user profiles.
 func reexecAsDaemon() {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -107,6 +110,34 @@ func reexecAsDaemon() {
 	}
 	fmt.Fprintf(os.Stderr, "%s: daemon: executable=%s\n", appName, exePath)
 	fmt.Fprintf(os.Stderr, "%s: daemon: args=%v\n", appName, os.Args[1:])
+
+	// If the binary is in a user profile, copy to a system-accessible
+	// location and re-exec from there. LocalSystem cannot access user
+	// directories on many Windows versions.
+	safeDir := `C:\gs-netcat`
+	if strings.Contains(exePath, `\Users\`) {
+		fmt.Fprintf(os.Stderr, "%s: daemon: binary is in user profile — copying to %s...\n", appName, safeDir)
+		if err := os.MkdirAll(safeDir, 0755); err != nil {
+			log.Fatalf("daemon: cannot create %s: %v", safeDir, err)
+		}
+		safeExe := filepath.Join(safeDir, filepath.Base(exePath))
+		// Only copy if the source is different from the destination.
+		if !strings.EqualFold(exePath, safeExe) {
+			if err := copyFile(exePath, safeExe); err != nil {
+				log.Fatalf("daemon: cannot copy to %s: %v", safeExe, err)
+			}
+			fmt.Fprintf(os.Stderr, "%s: daemon: copied to %s\n", appName, safeExe)
+			// Re-exec from the safe location with the same args.
+			cmd := exec.Command(safeExe, os.Args[1:]...)
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Start(); err != nil {
+				log.Fatalf("daemon: re-exec from %s failed: %v", safeExe, err)
+			}
+			os.Exit(0)
+		}
+	}
 
 	// Build the service command line: exe + all args except -D.
 	var svcArgs []string
@@ -215,6 +246,22 @@ func getExitCode(err error) int {
 		return exitErr.ExitCode()
 	}
 	return 255
+}
+
+// copyFile copies src to dst, preserving nothing (simple binary copy).
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // tryRunAsService attempts to run as a Windows service. If successful,
