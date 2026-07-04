@@ -30,6 +30,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -285,12 +286,19 @@ loop:
 			if ctx.Err() != nil {
 				break // normal shutdown
 			}
-			log.Printf("Accept failed: %v — retrying in 3s...", err)
+			// On BAD_AUTH ("address already in use"), the previous session's
+			// token hasn't expired yet on GSRN. Wait for it to expire before
+			// re-registering. Matches C's GSRN_TOKEN_LINGER_SEC + 3.
+			delay := 3 * time.Second
+			if errors.Is(err, gsocket.ErrGSRNAuthFailed) {
+				delay = 13 * time.Second
+			}
+			log.Printf("Accept failed: %v — retrying in %v...", err, delay.Round(time.Second))
 			peer.Close()
 			select {
 			case <-ctx.Done():
 				break loop
-			case <-time.After(3 * time.Second):
+			case <-time.After(delay):
 			}
 			continue
 		}
