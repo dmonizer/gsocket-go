@@ -200,6 +200,7 @@ func (p *Peer) runWithPTY(shell string) error {
 func (p *Peer) runWithPipes(shell string) error {
 	cmd := exec.Command(shell, shellInteractiveArgs()...)
 	cmd.Stderr = cmd.Stdout
+	setShellSysProcAttr(cmd)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {

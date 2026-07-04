@@ -2,24 +2,26 @@
 
 package gsocket
 
-import "os/exec"
+import (
+	"os/exec"
+	"syscall"
+)
 
 // shellExec returns the shell to use for -e command execution on Windows.
 // Tries PowerShell first (more capable), falls back to cmd.exe.
 func shellExec() string {
-	// Try PowerShell first — it handles quoting and Unix-style syntax better.
 	if p, err := exec.LookPath("powershell.exe"); err == nil {
 		return p
 	}
-	// Fall back to cmd.exe — always available on Windows.
 	if p, err := exec.LookPath("cmd.exe"); err == nil {
 		return p
 	}
-	// Absolute fallback (should never happen on real Windows).
 	return "cmd.exe"
 }
 
 // shellInteractive returns the shell for -i interactive mode on Windows.
+// cmd.exe works better with pipes than powershell for interactive use,
+// so prefer it when no explicit preference is set.
 func shellInteractive() string {
 	return shellExec()
 }
@@ -27,20 +29,31 @@ func shellInteractive() string {
 // shellExecArgs returns arguments for -e mode (execute a command).
 func shellExecArgs(command string) []string {
 	shell := shellExec()
-	// Check if it's PowerShell by looking at the path.
 	if len(shell) >= 14 && shell[len(shell)-14:] == "powershell.exe" {
 		return []string{"-NoProfile", "-NonInteractive", "-Command", command}
 	}
-	// cmd.exe or fallback.
 	return []string{"/C", command}
 }
 
-// shellInteractiveArgs returns arguments for an interactive shell session.
+// shellInteractiveArgs returns arguments for an interactive shell session
+// using pipes (no real console). cmd.exe /Q keeps it quiet.
 func shellInteractiveArgs() []string {
 	shell := shellInteractive()
 	if len(shell) >= 14 && shell[len(shell)-14:] == "powershell.exe" {
-		return []string{"-NoLogo"}
+		// -NoLogo: suppress banner, -NoExit: stay alive, -Command -: read from stdin
+		return []string{"-NoLogo", "-NoExit", "-Command", "-"}
 	}
-	// cmd.exe with no args gives an interactive prompt.
-	return nil
+	// cmd.exe: /Q turns echo off, stdin/stdout work via pipes.
+	return []string{"/Q"}
+}
+
+// setShellSysProcAttr prevents the child shell from writing directly to the
+// parent's console. Without this, powershell/cmd can use WriteConsole to
+// bypass the stdout pipe, sending output to the server console instead of
+// the GS channel. CREATE_NO_WINDOW forces pipe-only I/O.
+func setShellSysProcAttr(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+	}
 }

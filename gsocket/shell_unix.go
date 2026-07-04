@@ -2,7 +2,10 @@
 
 package gsocket
 
-import "os"
+import (
+	"os"
+	"os/exec"
+)
 
 // shellExec returns the shell to use for -e command execution.
 // Uses $SHELL from environment, falling back to /bin/sh.
@@ -28,3 +31,6 @@ func shellExecArgs(command string) []string {
 func shellInteractiveArgs() []string {
 	return []string{"-i"}
 }
+
+// setShellSysProcAttr is a no-op on Unix — PTY handles terminal isolation.
+func setShellSysProcAttr(cmd *exec.Cmd) {}
