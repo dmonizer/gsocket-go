@@ -167,15 +167,12 @@ func getExitCode(err error) int {
 	return 255
 }
 
-// isWindowsService returns true if we're running as a Windows service.
-func isWindowsService() bool {
-	is, err := svc.IsWindowsService()
-	return err == nil && is
-}
-
-// runAsService starts the Windows service dispatcher. It blocks until
-// the service stops. Called from main() when running as a service.
-func runAsService() error {
+// tryRunAsService attempts to run as a Windows service. If successful,
+// it blocks until the service stops and returns nil. If not running under
+// SCM, it returns an error immediately — the caller falls through to
+// console mode. This is more reliable than svc.IsWindowsService() on
+// older Windows versions.
+func tryRunAsService() error {
 	h := &serviceHandler{workerDone: make(chan struct{})}
 	err := svc.Run(serviceName, h)
 	if err != nil {

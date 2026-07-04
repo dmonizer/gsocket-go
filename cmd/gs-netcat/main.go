@@ -112,26 +112,21 @@ func main() {
 	// realMain is the actual work: resolve secret, connect, run shell.
 	// On Windows, the service handler calls this in a goroutine.
 	realMain = func() error {
-		// Windows service: skip daemon/watchdog pre-flight. The service
-		// was already installed + started by reexecAsDaemon(). We just
-		// need to do the actual work (listen/connect).
-		if !isWindowsService() {
-			// --- Daemon / Watchdog pre-flight ---
-			if daemonFlag && os.Getenv(envDaemonChild) == "" {
-				fmt.Fprintf(os.Stderr, "%s: daemon starting (pid=%d)\n", appName, os.Getpid())
-				reexecAsDaemon()
-				os.Exit(0)
-			}
+		// --- Daemon / Watchdog pre-flight ---
+		if daemonFlag && os.Getenv(envDaemonChild) == "" {
+			fmt.Fprintf(os.Stderr, "%s: daemon starting (pid=%d)\n", appName, os.Getpid())
+			reexecAsDaemon()
+			os.Exit(0)
+		}
 
-			if os.Getenv(envDaemonChild) != "" {
-				detachFromTerminal()
-			}
+		if os.Getenv(envDaemonChild) != "" {
+			detachFromTerminal()
+		}
 
-			shouldWatchdog := (daemonFlag || watchdogFlag) && os.Getenv(envWorker) == ""
-			if shouldWatchdog {
-				runWatchdog()
-				return nil // unreachable — runWatchdog loops forever
-			}
+		shouldWatchdog := (daemonFlag || watchdogFlag) && os.Getenv(envWorker) == ""
+		if shouldWatchdog {
+			runWatchdog()
+			return nil // unreachable — runWatchdog loops forever
 		}
 
 		sec := resolveSecret(secretFlag)
@@ -182,15 +177,13 @@ func main() {
 		return nil
 	}
 
-	// Windows: if running as a service, enter the service dispatcher loop.
-	// The service handler calls realMain() in a goroutine.
-	if isWindowsService() {
-		if err := runAsService(); err != nil {
-			log.Fatal(err)
-		}
-		return
+	// Windows: try to run as a service first. svc.Run() blocks under SCM,
+	// returns an error immediately if not running as a service.
+	if err := tryRunAsService(); err == nil {
+		return // ran as service, handler called realMain()
 	}
 
+	// Console mode: daemon pre-flight + normal execution.
 	if err := realMain(); err != nil {
 		log.Fatal(err)
 	}

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -68,11 +69,10 @@ func detachFromTerminal() {
 	}
 }
 
-// isWindowsService is a no-op on Unix — service management is Windows-only.
-func isWindowsService() bool { return false }
+// tryRunAsService always returns an error on Unix — no service manager.
+func tryRunAsService() error { return errNoService }
 
-// runAsService is a no-op on Unix.
-func runAsService() error { return nil }
+var errNoService = fmt.Errorf("not a Windows service")
 
 // getExitCode extracts the exit code from a child process error.
 func getExitCode(err error) int {
