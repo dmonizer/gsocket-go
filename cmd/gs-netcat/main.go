@@ -61,7 +61,7 @@ const (
 )
 
 func main() {
-	log.SetFlags(0)
+	log.SetFlags(log.LstdFlags)
 	log.SetPrefix(appName + ": ")
 
 	// Parse flags.
