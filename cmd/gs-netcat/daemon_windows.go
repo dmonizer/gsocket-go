@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -18,7 +19,20 @@ import (
 const (
 	serviceName = "gs-netcat"
 	serviceDesc = "Global Socket Relay Network — encrypted tunnel"
+	svcLogFile  = `C:\gs-netcat.log`
 )
+
+// svcLog writes a timestamped message to the service log file.
+// Used for debugging service startup issues (no console under SCM).
+func svcLog(format string, args ...interface{}) {
+	f, err := os.OpenFile(svcLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), msg)
+}
 
 // serviceHandler implements svc.Handler for the Windows service.
 type serviceHandler struct {
@@ -28,14 +42,17 @@ type serviceHandler struct {
 
 func (h *serviceHandler) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
 	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown
+	svcLog("Execute: called, args=%v", args)
 	log.Printf("service: Execute called, args=%v, entering StartPending", args)
 	changes <- svc.Status{State: svc.StartPending}
 
 	// Run the actual work in a goroutine.
 	go func() {
 		defer close(h.workerDone)
+		svcLog("Execute: launching realMain()...")
 		log.Printf("service: launching realMain()...")
 		h.workerErr = realMain()
+		svcLog("Execute: realMain() returned: %v", h.workerErr)
 		log.Printf("service: realMain() returned: %v", h.workerErr)
 	}()
 
@@ -127,7 +144,7 @@ func reexecAsDaemon() {
 		fmt.Fprintf(os.Stderr, "%s: daemon: OpenService('%s'): %s (service does not exist yet)\n", appName, serviceName, winErr(err))
 	}
 
-	// Create the service.
+	// Create the service. ServiceType defaults to SERVICE_WIN32_OWN_PROCESS.
 	fmt.Fprintf(os.Stderr, "%s: daemon: calling CreateService('%s', ...)\n", appName, serviceName)
 	s, err = m.CreateService(
 		serviceName,
@@ -146,14 +163,18 @@ func reexecAsDaemon() {
 
 	fmt.Fprintf(os.Stderr, "%s: daemon: calling startService('%s')...\n", appName, serviceName)
 	if err := startService(m, serviceName); err != nil {
-		// On some Windows versions (notably Win7), s.Start() returns
-		// ACCESS_DENIED even as Administrator. The service IS installed
-		// correctly — just start it manually.
 		fmt.Fprintf(os.Stderr, "%s: daemon: s.Start() returned: %v\n", appName, err)
-		fmt.Fprintf(os.Stderr, "%s: Service '%s' is installed but could not be started automatically.\n", appName, serviceName)
-		fmt.Fprintf(os.Stderr, "%s: Start it manually:\n", appName)
-		fmt.Fprintf(os.Stderr, "%s:   sc start %s\n", appName, serviceName)
-		fmt.Fprintf(os.Stderr, "%s: Or reboot — it's set to StartAutomatic.\n", appName)
+		fmt.Fprintf(os.Stderr, "%s: Service '%s' is installed but could not start.\n", appName, serviceName)
+		fmt.Fprintf(os.Stderr, "%s: \n", appName)
+		fmt.Fprintf(os.Stderr, "%s: Possible cause: The service (LocalSystem) cannot access\n", appName)
+		fmt.Fprintf(os.Stderr, "%s: the binary at: %s\n", appName, exePath)
+		fmt.Fprintf(os.Stderr, "%s: \n", appName)
+		fmt.Fprintf(os.Stderr, "%s: Try moving the binary to a system directory:\n", appName)
+		fmt.Fprintf(os.Stderr, "%s:   copy %s C:\\Windows\\System32\\\n", appName, exePath)
+		fmt.Fprintf(os.Stderr, "%s:   sc delete %s\n", appName, serviceName)
+		fmt.Fprintf(os.Stderr, "%s:   C:\\Windows\\System32\\%s -D ...\n", appName, filepath.Base(exePath))
+		fmt.Fprintf(os.Stderr, "%s: \n", appName)
+		fmt.Fprintf(os.Stderr, "%s: Or grant Read & Execute to Everyone on the file.\n", appName)
 		os.Exit(0)
 	}
 	os.Exit(0)
@@ -201,13 +222,16 @@ func getExitCode(err error) int {
 // SCM, it returns an error immediately — the caller falls through to
 // console mode.
 func tryRunAsService() error {
+	svcLog("tryRunAsService: entry, os.Args=%v", os.Args)
 	log.Printf("service: tryRunAsService: calling svc.Run('%s')...", serviceName)
 	h := &serviceHandler{workerDone: make(chan struct{})}
 	err := svc.Run(serviceName, h)
 	if err != nil {
+		svcLog("tryRunAsService: svc.Run returned: %s (not a service)", winErr(err))
 		log.Printf("service: svc.Run() returned error: %s (not a service)", winErr(err))
 		return err
 	}
+	svcLog("tryRunAsService: svc.Run returned nil, workerErr=%v", h.workerErr)
 	log.Printf("service: svc.Run() returned nil, workerErr=%v", h.workerErr)
 	return h.workerErr
 }
