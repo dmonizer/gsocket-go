@@ -448,19 +448,25 @@ func NewGSRNClient(secret string, opts ...GSRNClientOption) (*GSRNClient, error)
 
 // ConnectListener connects to the GSRN and sends a listen packet.
 // Returns the raw connection after successful registration.
+// If the client already has a token (set via SetToken or a previous
+// ConnectListener call), it reuses that token. Otherwise a new random
+// token is generated. Reusing the same token allows multiple concurrent
+// listen connections (matching C's multi-sox behaviour).
 func (c *GSRNClient) ConnectListener() (*GSRNConn, error) {
 	conn, err := c.dialGSRN()
 	if err != nil {
 		return nil, fmt.Errorf("connect to GSRN: %w", err)
 	}
 
-	// Generate random token for this listening session.
-	token, err := generateRandomToken()
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("generate token: %w", err)
+	// Generate random token if not already set (first registration).
+	if c.token == [TokenSize]byte{} {
+		token, err := generateRandomToken()
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("generate token: %w", err)
+		}
+		c.token = token
 	}
-	c.token = token
 	if c.verboseLog != nil {
 		c.verboseLog("sending LISTEN addr=%s token=%x", c.addr, c.token[:4])
 	}
@@ -477,6 +483,18 @@ func (c *GSRNClient) ConnectListener() (*GSRNConn, error) {
 	gsrn.StartKeepalive()
 	c.gsrnConn = gsrn
 	return gsrn, nil
+}
+
+// SetToken sets the GSRN protocol token to use for listen registrations.
+// Call this before ConnectListener to reuse a token across multiple
+// connections (C's multi-sox pattern).
+func (c *GSRNClient) SetToken(token [TokenSize]byte) {
+	c.token = token
+}
+
+// Token returns the current GSRN protocol token.
+func (c *GSRNClient) Token() [TokenSize]byte {
+	return c.token
 }
 
 // ConnectClient connects to the GSRN and sends a connect packet.

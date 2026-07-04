@@ -33,9 +33,14 @@ const (
 type Peer struct {
 	role    PeerRole
 	secret  string
-	channel *SecureChannel
-	gsrn    *GSRNConn
-	app     *AppProto
+	channel    *SecureChannel
+	gsrn       *GSRNConn
+	gsrnClient *GSRNClient // stored for token reuse (multi-sox)
+	app        *AppProto
+
+	// GSRN token cache for multi-sox token sharing.
+	gsrnToken    [TokenSize]byte
+	gsrnTokenSet bool
 
 	// Configuration.
 	targetAddr    string
@@ -136,6 +141,13 @@ func WithSockWait() PeerOption {
 	return func(p *Peer) { p.sockWait = true }
 }
 
+// WithToken sets the GSRN protocol token to reuse across listen connections.
+// This matches C's multi-sox pattern where all listen sockets share the same
+// address+token so GSRN allows multiple concurrent registrations.
+func WithToken(token [TokenSize]byte) PeerOption {
+	return func(p *Peer) { p.gsrnToken = token; p.gsrnTokenSet = true }
+}
+
 // WithLogger sets the logger for peer diagnostics.
 func WithLogger(l *log.Logger) PeerOption {
 	return func(p *Peer) { p.logger = l }
@@ -163,8 +175,12 @@ func (p *Peer) AcceptOnListener(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create GSRN client: %w", err)
 	}
+	p.gsrnClient = client
+	if p.gsrnTokenSet {
+		client.SetToken(p.gsrnToken)
+	}
 
-	p.logger.Printf("Registering on %s", client.addr.GSRNHostname())
+	p.logger.Printf("Registering on %s", client.primaryHost())
 
 	gsrn, err := client.ConnectListener()
 	if err != nil {
@@ -192,11 +208,12 @@ func (p *Peer) DialAndConnect(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("create GSRN client: %w", err)
 		}
+		p.gsrnClient = client
 
 		if p.sockWait {
-			p.logger.Printf("Waiting for server on %s...", client.addr.GSRNHostname())
+			p.logger.Printf("Waiting for server on %s...", client.primaryHost())
 		} else {
-			p.logger.Printf("Connecting to %s", client.addr.GSRNHostname())
+			p.logger.Printf("Connecting to %s", client.primaryHost())
 		}
 
 		gsrn, err := client.ConnectClient()
@@ -791,6 +808,12 @@ func wrapUDP(data []byte) []byte {
 // Channel returns the secure channel for direct read/write access.
 func (p *Peer) Channel() *SecureChannel {
 	return p.channel
+}
+
+// GSClient returns the underlying GSRN client, if available.
+// Used for accessing the GSRN protocol token (multi-sox token sharing).
+func (p *Peer) GSClient() *GSRNClient {
+	return p.gsrnClient
 }
 
 // Close shuts down the peer and releases resources.

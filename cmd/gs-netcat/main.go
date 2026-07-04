@@ -270,49 +270,108 @@ func runListener(secret string, opts []gsocket.PeerOption) {
 
 	sessionCount := 0
 
-	// Accept loop: handles one session at a time. The server registers
-	// on GSRN, waits for a client, handles the session, then re-registers
-	// for the next client. Sessions run inline (not goroutines) because
-	// the GSRN TCP connection becomes the encrypted channel — the address
-	// stays occupied until the session ends. Re-registering while a session
-	// is active causes BAD_AUTH since GSRN still sees the address in use.
-loop:
+	// Accept the first client (retry on transient failures).
+	var sharedToken [gsocket.TokenSize]byte
+	var firstPeer *gsocket.Peer
 	for ctx.Err() == nil {
-		peer := gsocket.NewPeer(secret, gsocket.RoleServer, opts...)
-
-		if err := peer.AcceptOnListener(ctx); err != nil {
+		firstPeer = gsocket.NewPeer(secret, gsocket.RoleServer, opts...)
+		if err := firstPeer.AcceptOnListener(ctx); err != nil {
 			if ctx.Err() != nil {
-				break // normal shutdown
+				firstPeer.Close()
+				return
 			}
 			delay := 3 * time.Second
 			log.Printf("Accept failed: %v — retrying in %v...", err, delay.Round(time.Second))
-			peer.Close()
+			firstPeer.Close()
 			select {
 			case <-ctx.Done():
-				break loop
+				return
 			case <-time.After(delay):
 			}
 			continue
 		}
+		break // success
+	}
+	if ctx.Err() != nil {
+		return
+	}
 
+	// Save the shared token for subsequent registrations (C's multi-sox).
+	if fc := firstPeer.GSClient(); fc != nil {
+		sharedToken = fc.Token()
+		opts = append(opts, gsocket.WithToken(sharedToken))
+	}
+
+	sessionCount++
+	log.Printf("Client connected [#%d]", sessionCount)
+
+	// Handle the first session in a goroutine so we can pre-open the
+	// next listen connection while this session runs. When ctx is
+	// cancelled, close the peer to unblock RunShell immediately.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer firstPeer.Close()
+		if err := firstPeer.RunShell(); err != nil {
+			log.Printf("Session ended: %v", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		firstPeer.Close()
+	}()
+
+	// Accept loop: keep one spare listen connection open so the next
+	// client can connect immediately even while a session is active.
+	// Matches C's multi-sox: multiple GSRN connections share one token.
+loop:
+	for ctx.Err() == nil {
+		// Open the next listen connection while the current session runs.
+		nextPeer := gsocket.NewPeer(secret, gsocket.RoleServer, opts...)
+		// sharedToken is passed via WithToken in opts — no need to set manually.
+
+		if err := nextPeer.AcceptOnListener(ctx); err != nil {
+			if ctx.Err() != nil {
+				nextPeer.Close()
+				break
+			}
+			log.Printf("Accept failed: %v — retrying in 3s...", err)
+			nextPeer.Close()
+			select {
+			case <-ctx.Done():
+				break loop
+			case <-time.After(3 * time.Second):
+			}
+			continue
+		}
+
+		// Save token from first successful registration and add to opts.
+		if nc := nextPeer.GSClient(); nc != nil && sharedToken == [gsocket.TokenSize]byte{} {
+			sharedToken = nc.Token()
+			opts = append(opts, gsocket.WithToken(sharedToken))
+		}
+
+		// Wait for the previous session to end, then start this one.
+		<-done
 		sessionCount++
 		log.Printf("Client connected [#%d]", sessionCount)
 
-		// Handle session inline — blocks until the client disconnects.
-		// Only then does the loop re-register for the next client.
-		if err := peer.RunShell(); err != nil {
-			log.Printf("Session ended: %v", err)
-		}
-		peer.Close()
-
-		// Brief delay before re-registering to let GSRN expire the
-		// previous session's registration.
-		select {
-		case <-ctx.Done():
-			break loop
-		case <-time.After(500 * time.Millisecond):
-		}
+		done = make(chan struct{})
+		go func(p *gsocket.Peer) {
+			defer close(done)
+			defer p.Close()
+			if err := p.RunShell(); err != nil {
+				log.Printf("Session ended: %v", err)
+			}
+		}(nextPeer)
+		go func(p *gsocket.Peer) {
+			<-ctx.Done()
+			p.Close()
+		}(nextPeer)
 	}
+
+	// Wait for the last session to end.
+	<-done
 }
 
 func runClient(secret string, opts []gsocket.PeerOption, interactive bool) {
