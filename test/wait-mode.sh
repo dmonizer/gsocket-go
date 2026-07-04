@@ -45,7 +45,7 @@ FAILED=0
 
 # --- Test 1: Without -w, client fails immediately ---
 info "Test 1: Without -w, client fails immediately when no server"
-timeout 5 "$GS_NETCAT" -s "$SECRET" >"$TMPDIR/stdout1" 2>"$TMPDIR/stderr1" &
+echo "" | timeout 5 "$GS_NETCAT" -s "$SECRET" >"$TMPDIR/stdout1" 2>"$TMPDIR/stderr1" &
 NOWAIT_PID=$!
 wait $NOWAIT_PID 2>/dev/null || true
 
@@ -60,7 +60,8 @@ fi
 
 # --- Test 2: -w client prints "Waiting" not just "Connecting" ---
 info "Test 2: -w client prints waiting message"
-timeout 3 "$GS_NETCAT" -s "$SECRET" -w >"$TMPDIR/stdout2" 2>"$TMPDIR/stderr2" &
+# Pipe stdin to prevent the stdin goroutine from blocking on terminal read.
+echo "" | timeout 3 "$GS_NETCAT" -s "$SECRET" -w >"$TMPDIR/stdout2" 2>"$TMPDIR/stderr2" &
 CLIENT_PID=$!
 sleep 1.5
 
@@ -84,9 +85,11 @@ kill $CLIENT_PID 2>/dev/null || true
 
 # --- Test 3: -w client connects when server appears ---
 info "Test 3: -w client connects when server starts (GSRN-dependent)"
-# Start client in wait mode. After 1s, start server.
+# Start client in wait mode. Pipe a newline so stdin unblocks when
+# the channel closes. Client is in relay mode (no -e): stdin→channel,
+# channel→stdout. Server output appears on client stdout.
 # This test requires GSRN connectivity. If GSRN is unavailable, skip gracefully.
-timeout 10 "$GS_NETCAT" -s "$SECRET" -w -e "echo SERVER_READY" >"$TMPDIR/stdout3" 2>"$TMPDIR/stderr3" &
+(echo ""; sleep 10) | timeout 10 "$GS_NETCAT" -s "$SECRET" -w >"$TMPDIR/stdout3" 2>"$TMPDIR/stderr3" &
 CLIENT_PID=$!
 
 # Give client time to start waiting.
