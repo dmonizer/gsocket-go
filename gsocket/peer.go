@@ -388,6 +388,9 @@ func (p *Peer) runRelay() error {
 			p.mu.Unlock()
 		}
 		if err != nil {
+			// Remote closed the channel — close our stdin to unblock the
+			// stdin→channel goroutine which may be stuck on os.Stdin.Read.
+			os.Stdin.Close()
 			return nil
 		}
 	}
@@ -524,6 +527,9 @@ func (p *Peer) runClientInteractive() error {
 			p.mu.Unlock()
 		}
 		if err != nil {
+			// Remote closed the channel — close stdin to unblock the
+			// stdin→channel goroutine stuck on terminal read.
+			os.Stdin.Close()
 			return nil
 		}
 	}
