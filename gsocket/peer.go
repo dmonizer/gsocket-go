@@ -38,6 +38,7 @@ type Peer struct {
 	listenAddr  string
 	execCmd     string
 	interactive bool
+	socksServer bool
 	logger      *log.Logger
 
 	// Internal state.
@@ -72,6 +73,14 @@ func WithExecCmd(cmd string) PeerOption {
 // WithInteractive enables interactive shell mode.
 func WithInteractive() PeerOption {
 	return func(p *Peer) { p.interactive = true }
+}
+
+// WithSOCKSServer enables SOCKS5 server mode. The peer acts as a SOCKS5
+// proxy: after the GS tunnel is established, the server reads a SOCKS5
+// CONNECT request from the channel and forwards the traffic to the
+// requested target. Use with -l (listen/server mode).
+func WithSOCKSServer() PeerOption {
+	return func(p *Peer) { p.socksServer = true }
 }
 
 // WithLogger sets the logger for peer diagnostics.
@@ -169,6 +178,13 @@ func (p *Peer) RunShell() error {
 		return p.forwardLocalPort()
 	}
 
+	// SOCKS5 server mode: after the tunnel is established, act as a
+	// SOCKS5 proxy — read CONNECT requests from the encrypted channel
+	// and forward them to the requested destinations.
+	if p.socksServer {
+		return p.runSOCKSServer()
+	}
+
 	fmt.Fprintf(os.Stderr, "GS tunnel established. Press Ctrl-C to exit.\r\n")
 
 	if p.execCmd != "" {
@@ -183,6 +199,54 @@ func (p *Peer) RunShell() error {
 		return p.runClientInteractive()
 	}
 	return p.runRelay()
+}
+
+// runSOCKSServer handles the server side of SOCKS5 proxying through the GS
+// tunnel. It reads a SOCKS5 CONNECT request from the encrypted channel,
+// connects to the requested target, and relays data bidirectionally.
+//
+// On success a SOCKS5 reply is sent back through the channel before
+// relaying begins. The SOCKS5 client (remote peer) drives the requests;
+// each call to runSOCKSServer handles one CONNECT request.
+func (p *Peer) runSOCKSServer() error {
+	p.logger.Printf("SOCKS5 server mode active")
+
+	for {
+		// Read and handle one SOCKS5 CONNECT request.
+		target, err := SOCKSServe(p.channel)
+		if err != nil {
+			return fmt.Errorf("SOCKS5 serve: %w", err)
+		}
+
+		p.logger.Printf("SOCKS5 CONNECT to %s", target.RemoteAddr())
+
+		// Bidirectional relay.
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			io.Copy(p.channel, target)
+			p.Close()
+		}()
+
+		go func() {
+			defer wg.Done()
+			io.Copy(target, p.channel)
+			p.Close()
+		}()
+
+		wg.Wait()
+		target.Close()
+
+		// If the peer has been closed, stop serving.
+		p.mu.Lock()
+		running := p.running
+		p.mu.Unlock()
+		if !running {
+			return nil
+		}
+	}
 }
 
 // runRelay is the default mode: bidirectional relay between local stdin/stdout
