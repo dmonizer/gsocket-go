@@ -96,23 +96,27 @@ func main() {
 	// Daemon mode includes watchdog (auto-restart) behaviour, matching C's
 	// GS_daemonize() which combines daemonizing + watchdog in one function.
 	if *daemon && os.Getenv(envDaemonChild) == "" {
+		fmt.Fprintf(os.Stderr, "%s: daemon starting (pid=%d)\n", appName, os.Getpid())
 		reexecAsDaemon()
 		os.Exit(0)
 	}
 
-	// -W: Re-exec the worker under watchdog supervision. The watchdog
-	// parent monitors the child and restarts it on crash with backoff.
-	if *watchdog && os.Getenv(envWorker) == "" {
-		runWatchdog()
-		return // runWatchdog loops forever
-	}
-
 	// --- Daemon child: detach from terminal ---
-	// We are the re-exec'd daemon child (or grandchild if -W was also set).
-	// Detach from the controlling terminal: new session, chdir to /, close
-	// standard file descriptors.
+	// We are the re-exec'd daemon child. Detach from the controlling
+	// terminal: new session, chdir to /, close standard file descriptors.
+	// Do this BEFORE watchdog so the watchdog also runs detached.
 	if os.Getenv(envDaemonChild) != "" {
 		detachFromTerminal()
+	}
+
+	// -D implies watchdog (matching C's GS_daemonize which combines
+	// daemonizing + watchdog in one function). -W alone gives watchdog
+	// without daemonizing. Either path spawns a worker child and monitors
+	// it with restart-on-crash backoff.
+	shouldWatchdog := (*daemon || *watchdog) && os.Getenv(envWorker) == ""
+	if shouldWatchdog {
+		runWatchdog()
+		return // runWatchdog loops forever, worker does the work
 	}
 
 	// Resolve secret from flag, environment, or interactive prompt.
