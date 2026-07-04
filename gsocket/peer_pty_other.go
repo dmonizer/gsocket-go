@@ -28,7 +28,6 @@ func (p *Peer) runWithPTY(shell string) error {
 	}
 
 	cmd := exec.Command(shell, shellInteractiveArgs()...)
-	cmd.Stderr = cmd.Stdout
 	setShellSysProcAttr(cmd)
 
 	stdinPipe, err := cmd.StdinPipe()
@@ -39,6 +38,9 @@ func (p *Peer) runWithPTY(shell string) error {
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
+	// Merge stderr into stdout AFTER StdoutPipe() creates the pipe.
+	// If set before, cmd.Stdout is nil and stderr defaults to os.Stderr.
+	cmd.Stderr = cmd.Stdout
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start shell: %w", err)
