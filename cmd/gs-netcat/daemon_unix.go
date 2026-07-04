@@ -24,7 +24,13 @@ func reexecAsDaemon() {
 		env = append(env, envWorker+"=1")
 	}
 
-	cmd := exec.Command(args[0], args[1:]...)
+	// Resolve full path — args[0] may be a bare filename.
+	exePath := args[0]
+	if ep, err := os.Executable(); err == nil {
+		exePath = ep
+	}
+
+	cmd := exec.Command(exePath, args[1:]...)
 	cmd.Env = env
 	cmd.Stdin = nil
 	cmd.Stdout = nil

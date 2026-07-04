@@ -27,6 +27,13 @@ func runWatchdog() {
 		env = append(env, envDaemonChild+"=1")
 	}
 
+	// Resolve full executable path. On Windows, args[0] may be just the
+	// filename (e.g. "gs-netcat.exe") which exec.Command cannot resolve.
+	exePath := args[0]
+	if ep, err := os.Executable(); err == nil {
+		exePath = ep
+	}
+
 	var (
 		nBadAuth     int
 		maxBadAuth   = 2
@@ -35,7 +42,7 @@ func runWatchdog() {
 	)
 
 	for {
-		cmd := exec.Command(args[0], args[1:]...)
+		cmd := exec.Command(exePath, args[1:]...)
 		cmd.Env = env
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
