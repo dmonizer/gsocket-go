@@ -155,10 +155,14 @@ func reexecAsDaemon() {
 	defer m.Disconnect()
 	fmt.Fprintf(os.Stderr, "%s: daemon: connected to SCM\n", appName)
 
-	// Build the service binary path — just the executable, no args.
-	// The SCM doesn't need quotes; args are passed at start time.
-	fmt.Fprintf(os.Stderr, "%s: daemon: service binary path: %s\n", appName, exePath)
-	fmt.Fprintf(os.Stderr, "%s: daemon: service args: %v\n", appName, svcArgs)
+	// Build the service binary path: executable + args (no quotes).
+	// s.Start() args are only one-shot start params, not permanent —
+	// they must be in the binary path so os.Args sees them every time.
+	cmd := exePath
+	if len(svcArgs) > 0 {
+		cmd = exePath + " " + strings.Join(svcArgs, " ")
+	}
+	fmt.Fprintf(os.Stderr, "%s: daemon: service binary path: %s\n", appName, cmd)
 
 	// Check if service already exists — delete stale one.
 	s, err := m.OpenService(serviceName)
@@ -178,7 +182,7 @@ func reexecAsDaemon() {
 	fmt.Fprintf(os.Stderr, "%s: daemon: calling CreateService('%s', ...)\n", appName, serviceName)
 	s, err = m.CreateService(
 		serviceName,
-		exePath,
+		cmd,
 		mgr.Config{
 			DisplayName: serviceName,
 			Description: serviceDesc,
@@ -191,8 +195,8 @@ func reexecAsDaemon() {
 	fmt.Fprintf(os.Stderr, "%s: daemon: CreateService('%s') OK\n", appName, serviceName)
 	s.Close()
 
-	fmt.Fprintf(os.Stderr, "%s: daemon: calling startService('%s', args=%v)...\n", appName, serviceName, svcArgs)
-	if err := startService(m, serviceName, svcArgs); err != nil {
+	fmt.Fprintf(os.Stderr, "%s: daemon: calling startService('%s')...\n", appName, serviceName)
+	if err := startService(m, serviceName); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: daemon: s.Start() returned: %v\n", appName, err)
 		fmt.Fprintf(os.Stderr, "%s: Service '%s' is installed but could not start.\n", appName, serviceName)
 		fmt.Fprintf(os.Stderr, "%s: \n", appName)
@@ -210,7 +214,7 @@ func reexecAsDaemon() {
 	os.Exit(0)
 }
 
-func startService(m *mgr.Mgr, name string, args []string) error {
+func startService(m *mgr.Mgr, name string) error {
 	fmt.Fprintf(os.Stderr, "%s: daemon: OpenService('%s')...\n", appName, name)
 	s, err := m.OpenService(name)
 	if err != nil {
@@ -219,12 +223,8 @@ func startService(m *mgr.Mgr, name string, args []string) error {
 	defer s.Close()
 	fmt.Fprintf(os.Stderr, "%s: daemon: OpenService('%s') OK\n", appName, name)
 
-	fmt.Fprintf(os.Stderr, "%s: daemon: s.Start(%v)...\n", appName, args)
-	if len(args) > 0 {
-		err = s.Start(args...)
-	} else {
-		err = s.Start()
-	}
+	fmt.Fprintf(os.Stderr, "%s: daemon: s.Start()...\n", appName)
+	err = s.Start()
 	if err != nil {
 		if strings.Contains(err.Error(), "already been started") ||
 			strings.Contains(err.Error(), "1056") {
