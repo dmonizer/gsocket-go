@@ -7,6 +7,7 @@
 /gs-netcat-darwin-arm64
 
 # Build output
+/build/
 *.exe
 *.test
 *.out
