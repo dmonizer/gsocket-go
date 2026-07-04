@@ -1,10 +1,10 @@
-# Binaries
-gs-netcat
-gs-netcat-linux
-gs-netcat-linux-amd64
-gs-netcat.exe
-gs-netcat-darwin
-gs-netcat-darwin-arm64
+# Binaries (root-level only — don't match cmd/gs-netcat/ source)
+/gs-netcat
+/gs-netcat-linux
+/gs-netcat-linux-amd64
+/gs-netcat.exe
+/gs-netcat-darwin
+/gs-netcat-darwin-arm64
 
 # Build output
 *.exe

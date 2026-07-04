@@ -5,10 +5,11 @@
 ## Summary
 
 The Go implementation covers the **core happy path** of the original C codebase
-(~45% of features). It handles the fundamental use case — two peers connecting
-interactively over GSRN — but is missing many advanced features: multi-peer
-support, the file transfer engine, the console system, daemon/watchdog mode,
-and the event management subsystem.
+(~63% of features). It handles the fundamental use case — two peers connecting
+interactively over GSRN — plus SOCKS5 proxying, multi-peer concurrency, UDP
+transport, daemon mode, and watchdog auto-restart. Still missing: file transfer
+engine, console system, IDS, full statistics formatting, and several minor CLI
+flags.
 
 ---
 
@@ -66,22 +67,23 @@ to each other. From a security standpoint the Go protocol is actually stronger
 | `-d <IP>` | ✅ | ✅ | Destination IP for TCP forwarding |
 | `-p <port>` | ✅ | ✅ | Port for listen or forward |
 | `-t` | ✅ | ❌ | Check if server is listening (probe only) |
-| `-S` | ✅ | ❌ | Act as SOCKS server (needs `-l`) |
-| `-D` | ✅ | ❌ | Daemon mode (fork & background) |
-| `-W` | ✅ | ❌ | Watchdog mode (auto-restart on crash) |
-| `-u` | ✅ | ❌ | UDP transport (`-p` required) |
-| `-r` | ✅ | ❌ | Random secret / receive-only mode |
+| `-S` | ✅ | ✅ | Act as SOCKS server (needs `-l`) |
+| `-D` | ✅ | ✅ | Daemon mode (fork & background, includes watchdog) |
+| `-W` | ✅ | ✅ | Watchdog mode (auto-restart on crash) |
+| `-u` | ✅ | ✅ | UDP transport (`-p` required) |
+| `-r` | ✅ | ❌ | Receive-only mode |
 | `-T` | ✅ | ❌ | TOR (legacy flag) |
 | `--tor` | ✅ | ✅ | TOR via SOCKS5 (`127.0.0.1:9050`) |
 | `-m` | ✅ | ❌ | Display man page |
 | `-w` | ✅ | ✅ | Wait for server to become available |
 | `-q` | ✅ | ❌ | Quiet mode |
 | `-v` | ✅ | ✅ | Verbose output |
-| `-g` | ✅ | ❌ | Print cipher/strength greeting |
+| `-g` | ✅ | ✅ | Generate a random secret and exit |
 | `-L <file>` | ✅ | ❌ | Log to file |
 | `-C` | ✅ | ❌ | Console status bar |
 | `GSOCKET_SECRET` env | ✅ | ✅ | |
 | `GSOCKET_ARGS` env | ✅ | ❌ | Additional CLI args from env |
+| Random secret (no `-s`) | ✅ | ✅ | Prompt user; Enter → auto-generate |
 
 ---
 
@@ -189,8 +191,9 @@ for active sessions (30 s timeout) before exiting.
 
 | Feature | C | Go |
 |---|---|---|
-| Daemon mode (`-D`) — fork, detach, chdir, close stdio | ✅ | ❌ |
-| Watchdog mode (`-W`) — auto-restart child on crash, exponential backoff | ✅ | ❌ |
+| Daemon mode (`-D`) — fork, detach, chdir, close stdio | ✅ | ✅ — re-exec + setsid |
+| Watchdog mode (`-W`) — auto-restart child on crash, backoff | ✅ | ✅ — 60s default, 1s if >60s uptime, 13s on BAD_AUTH |
+| Two consecutive BAD_AUTH exits → stop daemon | ✅ | ✅ — exit code 201 |
 | PID file writing (`-P <path>`) | ✅ | ❌ |
 | Internal mode — stdin auth-cookie protocol | ✅ | ❌ |
 | `_GSOCKET_INTERNAL` env var | ✅ | ❌ |
@@ -314,20 +317,20 @@ ordering, and integration with the `select()` loop for timing.
 | GSRN wire protocol | **85%** | Core works; missing multi-sox and auto-reconnect |
 | Address derivation | **100%** | Identical to C |
 | Crypto | **100%*** | Different but equivalent security; not wire-compatible with C |
-| CLI flags | **35%** | Basic flags only (`-l -s -i -e -d -p --tor -w -v`) |
+| CLI flags | **55%** | Basic + SOCKS + UDP + daemon + watchdog; missing `-k`, `-t`, `-q`, `-r`, `-C`, etc. |
 | Interactive shell | **40%** | PTY works; missing resize, console, escape handling |
 | App protocol parser | **60%** | Parsing works; zero callbacks wired into `Peer` |
 | File transfer | **5%** | Only channel-type constants defined |
 | SOCKS5 | **100%** | Client + server; env vars; TOR |
 | Multi-peer | **70%** | Goroutine-per-session; missing ID tracking, single-shot |
-| Daemon / watchdog | **0%** | Not implemented |
+| Daemon / watchdog | **60%** | `-D` + `-W` with backoff; missing PID file, internal mode |
 | Event / timer system | **10%** | GSRN ping ticker only |
 | UDP | **80%** | Framing + forwarding; missing idle timeout |
 | IDS | **0%** | Not implemented |
 | Statistics / logging | **20%** | Byte counters only; no formatting, rates, or logs |
 | Tests | **100%** | 25+ tests covering protocol, crypto, and appproto |
 | Portability | **100%** | Pure Go → Linux, macOS, Windows native |
-| **OVERALL** | **~57%** | Core + SOCKS5 + multi-peer + UDP complete |
+| **OVERALL** | **~63%** | Core + SOCKS5 + multi-peer + UDP + daemon + watchdog complete |
 
 ---
 
@@ -340,7 +343,7 @@ ordering, and integration with the `select()` loop for timing.
 | Log to file (`-L`), quiet mode, env-var GSRN opts | Small |
 | Multi-sox backlog for faster re-accept | Medium |
 | Auto-reconnect & DNS re-resolution | Medium |
-| Daemon + watchdog mode | Medium |
+| ~~Daemon + watchdog mode~~ | ~~Medium~~ ✅ Done |
 | Statistics formatting & disconnect summary | Medium |
 | File transfer engine (PUT/GET/LIST/globbing/resume) | **Large** |
 | Console system (status bar, Ctrl-E commands) | **Large** |
