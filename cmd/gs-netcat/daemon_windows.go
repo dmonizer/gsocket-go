@@ -98,12 +98,11 @@ func reexecAsDaemon() {
 	// Check if service already exists.
 	s, err := m.OpenService(serviceName)
 	if err == nil {
+		// Delete and recreate to fix stale binary path from previous runs.
+		// A broken service (wrong path, doubled args) can't be started.
+		s.Delete()
 		s.Close()
-		fmt.Fprintf(os.Stderr, "%s: service '%s' already installed, starting...\n", appName, serviceName)
-		if err := startService(m, serviceName); err != nil {
-			log.Fatalf("daemon: %v", err)
-		}
-		os.Exit(0)
+		fmt.Fprintf(os.Stderr, "%s: removed stale service '%s', recreating...\n", appName, serviceName)
 	}
 
 	// Create the service.
