@@ -170,8 +170,11 @@ func main() {
 	// function because the behaviour differs: the listener should exit
 	// on Ctrl-C, while an interactive client forwards Ctrl-C to the
 	// remote shell.
+	if *wait {
+		opts = append(opts, gsocket.WithSockWait())
+	}
 	if *listen {
-		runListener(sec, opts, *wait)
+		runListener(sec, opts)
 	} else {
 		runClient(sec, opts, *interactive)
 	}
@@ -252,7 +255,7 @@ func resolveSOCKS5Addr(useTor bool) string {
 	return ""
 }
 
-func runListener(secret string, opts []gsocket.PeerOption, waitMode bool) {
+func runListener(secret string, opts []gsocket.PeerOption) {
 	// Shared shutdown: one Ctrl-C stops the entire listener loop.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

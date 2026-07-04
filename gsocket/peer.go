@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -45,6 +46,7 @@ type Peer struct {
 	multiPeer     bool   // accept multiple connections (server + client -p)
 	isUDP         bool   // use UDP transport with length-prefix framing
 	socksProxyAddr string // SOCKS5 proxy address for GSRN connections
+	sockWait      bool   // wait for server to become available (-w)
 	logger        *log.Logger
 
 	// Internal state.
@@ -127,6 +129,13 @@ func WithSOCKS5Proxy(addr string) PeerOption {
 	return func(p *Peer) { p.socksProxyAddr = addr }
 }
 
+// WithSockWait enables wait-for-server mode (-w flag). On the client side,
+// DialAndConnect retries every 2 seconds until a server appears instead of
+// failing immediately with "no server listening". Matches C's GS_OPT_SOCKWAIT.
+func WithSockWait() PeerOption {
+	return func(p *Peer) { p.sockWait = true }
+}
+
 // WithLogger sets the logger for peer diagnostics.
 func WithLogger(l *log.Logger) PeerOption {
 	return func(p *Peer) { p.logger = l }
@@ -173,22 +182,44 @@ func (p *Peer) AcceptOnListener(ctx context.Context) error {
 }
 
 // DialAndConnect connects to GSRN as a client and establishes a secure channel.
-// It blocks until the secure channel is established.
+// It blocks until the secure channel is established. If sockWait is true, it
+// retries every 2 seconds until a server appears (matching C's GS_OPT_SOCKWAIT).
 func (p *Peer) DialAndConnect(ctx context.Context) error {
 	opts := append(p.gsrnClientOpts(), WithFlags(flagProtoLowLatency))
-	client, err := NewGSRNClient(p.secret, opts...)
-	if err != nil {
-		return fmt.Errorf("create GSRN client: %w", err)
+
+	for {
+		client, err := NewGSRNClient(p.secret, opts...)
+		if err != nil {
+			return fmt.Errorf("create GSRN client: %w", err)
+		}
+
+		if p.sockWait {
+			p.logger.Printf("Waiting for server on %s...", client.addr.GSRNHostname())
+		} else {
+			p.logger.Printf("Connecting to %s", client.addr.GSRNHostname())
+		}
+
+		gsrn, err := client.ConnectClient()
+		if err == nil {
+			return p.finishHandshake(gsrn, false)
+		}
+
+		// If not waiting, fail immediately.
+		if !p.sockWait {
+			return fmt.Errorf("connect to GSRN: %w", err)
+		}
+
+		// Only retry on "no server listening"; fail fast on other errors.
+		if !errors.Is(err, ErrGSRNConnRefused) {
+			return fmt.Errorf("connect to GSRN: %w", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
-
-	p.logger.Printf("Connecting to %s", client.addr.GSRNHostname())
-
-	gsrn, err := client.ConnectClient()
-	if err != nil {
-		return fmt.Errorf("connect to GSRN: %w", err)
-	}
-
-	return p.finishHandshake(gsrn, false)
 }
 
 // gsrnClientOpts builds GSRNClient options from the peer's configuration.
