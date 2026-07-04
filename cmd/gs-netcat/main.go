@@ -30,7 +30,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -38,7 +37,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/hackerschoice/gsocket-go/gsocket"
@@ -270,14 +268,14 @@ func runListener(secret string, opts []gsocket.PeerOption) {
 		cancel()
 	}()
 
-	// Track active sessions for clean shutdown.
-	var wg sync.WaitGroup
-	activeCount := 0
+	sessionCount := 0
 
-	// Accept loop: each accepted client gets its own goroutine so
-	// multiple clients can be connected simultaneously. The server
-	// re-registers with GSRN immediately after each accept to
-	// minimise the window where no listener is present.
+	// Accept loop: handles one session at a time. The server registers
+	// on GSRN, waits for a client, handles the session, then re-registers
+	// for the next client. Sessions run inline (not goroutines) because
+	// the GSRN TCP connection becomes the encrypted channel — the address
+	// stays occupied until the session ends. Re-registering while a session
+	// is active causes BAD_AUTH since GSRN still sees the address in use.
 loop:
 	for ctx.Err() == nil {
 		peer := gsocket.NewPeer(secret, gsocket.RoleServer, opts...)
@@ -286,13 +284,7 @@ loop:
 			if ctx.Err() != nil {
 				break // normal shutdown
 			}
-			// On BAD_AUTH ("address already in use"), the previous session's
-			// token hasn't expired yet on GSRN. Wait for it to expire before
-			// re-registering. Matches C's GSRN_TOKEN_LINGER_SEC + 3.
 			delay := 3 * time.Second
-			if errors.Is(err, gsocket.ErrGSRNAuthFailed) {
-				delay = 13 * time.Second
-			}
 			log.Printf("Accept failed: %v — retrying in %v...", err, delay.Round(time.Second))
 			peer.Close()
 			select {
@@ -303,40 +295,23 @@ loop:
 			continue
 		}
 
-		// Spawn session handler — does not block the accept loop.
-		wg.Add(1)
-		activeCount++
-		log.Printf("Client connected [%d active session(s)]", activeCount)
+		sessionCount++
+		log.Printf("Client connected [#%d]", sessionCount)
 
-		go func(p *gsocket.Peer) {
-			defer wg.Done()
-			defer p.Close()
-			if err := p.RunShell(); err != nil {
-				log.Printf("Session ended: %v", err)
-			}
-		}(peer)
+		// Handle session inline — blocks until the client disconnects.
+		// Only then does the loop re-register for the next client.
+		if err := peer.RunShell(); err != nil {
+			log.Printf("Session ended: %v", err)
+		}
+		peer.Close()
 
-		// Brief yield to let the goroutine start and to avoid
-		// hammering GSRN with immediate re-registration.
+		// Brief delay before re-registering to let GSRN expire the
+		// previous session's registration.
 		select {
 		case <-ctx.Done():
 			break loop
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(500 * time.Millisecond):
 		}
-	}
-
-	// Wait for active sessions to finish (with timeout).
-	log.Printf("Waiting for active sessions to finish...")
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		log.Printf("All sessions finished.")
-	case <-time.After(30 * time.Second):
-		log.Printf("Timed out waiting for sessions to finish.")
 	}
 }
 
