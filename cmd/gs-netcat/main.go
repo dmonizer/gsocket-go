@@ -60,6 +60,10 @@ const (
 	exitBadAuth = 201
 )
 
+// realMain is the actual work function, set by main() and called either
+// directly (console mode) or by the Windows service handler.
+var realMain func() error
+
 func main() {
 	log.SetFlags(log.LstdFlags)
 	log.SetPrefix(appName + ": ")
@@ -90,92 +94,100 @@ func main() {
 		os.Exit(0)
 	}
 
-	// --- Daemon / Watchdog pre-flight ---
-	// -D: Re-exec as a daemon child, parent exits immediately.
-	// Daemon mode includes watchdog (auto-restart) behaviour, matching C's
-	// GS_daemonize() which combines daemonizing + watchdog in one function.
-	if *daemon && os.Getenv(envDaemonChild) == "" {
-		fmt.Fprintf(os.Stderr, "%s: daemon starting (pid=%d)\n", appName, os.Getpid())
-		reexecAsDaemon()
-		os.Exit(0)
+	// Capture flag values for realMain closure (flag pointers change).
+	listenFlag := *listen
+	interactiveFlag := *interactive
+	secretFlag := *secret
+	execCmdFlag := *execCmd
+	targetAddrFlag := *targetAddr
+	listenPortFlag := *listenPort
+	socksServerFlag := *socksServer
+	useUDPFlag := *useUDP
+	useTorFlag := *useTor
+	verboseFlag := *verbose
+	waitFlag := *wait
+	daemonFlag := *daemon
+	watchdogFlag := *watchdog
+
+	// realMain is the actual work: resolve secret, connect, run shell.
+	// On Windows, the service handler calls this in a goroutine.
+	realMain = func() error {
+		// --- Daemon / Watchdog pre-flight ---
+		if daemonFlag && os.Getenv(envDaemonChild) == "" {
+			fmt.Fprintf(os.Stderr, "%s: daemon starting (pid=%d)\n", appName, os.Getpid())
+			reexecAsDaemon()
+			os.Exit(0)
+		}
+
+		if os.Getenv(envDaemonChild) != "" {
+			detachFromTerminal()
+		}
+
+		shouldWatchdog := (daemonFlag || watchdogFlag) && os.Getenv(envWorker) == ""
+		if shouldWatchdog {
+			runWatchdog()
+			return nil // unreachable — runWatchdog loops forever
+		}
+
+		sec := resolveSecret(secretFlag)
+		if sec == "" {
+			return fmt.Errorf("no secret provided")
+		}
+
+		logger := log.New(os.Stderr, appName+": ", log.LstdFlags)
+		if !verboseFlag {
+			logger.SetOutput(os.Stderr)
+		}
+
+		var opts []gsocket.PeerOption
+		if execCmdFlag != "" {
+			opts = append(opts, gsocket.WithExecCmd(execCmdFlag))
+		}
+		if interactiveFlag {
+			opts = append(opts, gsocket.WithInteractive())
+		}
+		if targetAddrFlag != "" {
+			opts = append(opts, gsocket.WithTargetAddr(targetAddrFlag))
+		}
+		if listenPortFlag != "" {
+			opts = append(opts, gsocket.WithListenAddr(listenPortFlag))
+		}
+		if socksServerFlag {
+			opts = append(opts, gsocket.WithSOCKSServer())
+		}
+		if useUDPFlag {
+			opts = append(opts, gsocket.WithUDP())
+		}
+		if socksAddr := resolveSOCKS5Addr(useTorFlag); socksAddr != "" {
+			opts = append(opts, gsocket.WithSOCKS5Proxy(socksAddr))
+		}
+		if interactiveFlag || execCmdFlag != "" || targetAddrFlag != "" || socksServerFlag || listenPortFlag != "" {
+			opts = append(opts, gsocket.WithMultiPeer())
+		}
+		opts = append(opts, gsocket.WithLogger(logger))
+
+		if waitFlag {
+			opts = append(opts, gsocket.WithSockWait())
+		}
+		if listenFlag {
+			runListener(sec, opts)
+		} else {
+			runClient(sec, opts, interactiveFlag)
+		}
+		return nil
 	}
 
-	// --- Daemon child: detach from terminal ---
-	// We are the re-exec'd daemon child. Detach from the controlling
-	// terminal: new session, chdir to /, close standard file descriptors.
-	// Do this BEFORE watchdog so the watchdog also runs detached.
-	if os.Getenv(envDaemonChild) != "" {
-		detachFromTerminal()
+	// Windows: if running as a service, enter the service dispatcher loop.
+	// The service handler calls realMain() in a goroutine.
+	if isWindowsService() {
+		if err := runAsService(); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 
-	// -D implies watchdog (matching C's GS_daemonize which combines
-	// daemonizing + watchdog in one function). -W alone gives watchdog
-	// without daemonizing. Either path spawns a worker child and monitors
-	// it with restart-on-crash backoff.
-	shouldWatchdog := (*daemon || *watchdog) && os.Getenv(envWorker) == ""
-	if shouldWatchdog {
-		runWatchdog()
-		return // runWatchdog loops forever, worker does the work
-	}
-
-	// Resolve secret from flag, environment, or interactive prompt.
-	// When -s is not provided and GSOCKET_SECRET is not set, the user is
-	// prompted — matching C's GS_user_secret() behaviour. Pressing Enter
-	// at the prompt generates a cryptographically random secret.
-	sec := resolveSecret(*secret)
-	if sec == "" {
-		log.Fatal("No secret provided. Use -s <secret> or set GSOCKET_SECRET environment variable.")
-	}
-
-	// Configure logger.
-	logger := log.New(os.Stderr, appName+": ", log.LstdFlags)
-	if !*verbose {
-		logger.SetOutput(os.Stderr)
-	}
-
-	// Build peer options.
-	var opts []gsocket.PeerOption
-	if *execCmd != "" {
-		opts = append(opts, gsocket.WithExecCmd(*execCmd))
-	}
-	if *interactive {
-		opts = append(opts, gsocket.WithInteractive())
-	}
-	if *targetAddr != "" {
-		opts = append(opts, gsocket.WithTargetAddr(*targetAddr))
-	}
-	if *listenPort != "" {
-		opts = append(opts, gsocket.WithListenAddr(*listenPort))
-	}
-	if *socksServer {
-		opts = append(opts, gsocket.WithSOCKSServer())
-	}
-	if *useUDP {
-		opts = append(opts, gsocket.WithUDP())
-	}
-	// Resolve SOCKS5 proxy address for GSRN TCP connections.
-	// Priority: --tor flag > GSOCKET_SOCKS_IP / GSOCKET_SOCKS_PORT env vars.
-	if socksAddr := resolveSOCKS5Addr(*useTor); socksAddr != "" {
-		opts = append(opts, gsocket.WithSOCKS5Proxy(socksAddr))
-	}
-	// Multi-peer: any flag that implies multiple sessions.
-	// Server: -i, -e, -d, -S. Client: -p.
-	if *interactive || *execCmd != "" || *targetAddr != "" || *socksServer || *listenPort != "" {
-		opts = append(opts, gsocket.WithMultiPeer())
-	}
-	opts = append(opts, gsocket.WithLogger(logger))
-
-	// Dispatch based on mode. Signal handling is set up inside each
-	// function because the behaviour differs: the listener should exit
-	// on Ctrl-C, while an interactive client forwards Ctrl-C to the
-	// remote shell.
-	if *wait {
-		opts = append(opts, gsocket.WithSockWait())
-	}
-	if *listen {
-		runListener(sec, opts)
-	} else {
-		runClient(sec, opts, *interactive)
+	if err := realMain(); err != nil {
+		log.Fatal(err)
 	}
 }
 

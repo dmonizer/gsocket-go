@@ -68,6 +68,12 @@ func detachFromTerminal() {
 	}
 }
 
+// isWindowsService is a no-op on Unix — service management is Windows-only.
+func isWindowsService() bool { return false }
+
+// runAsService is a no-op on Unix.
+func runAsService() error { return nil }
+
 // getExitCode extracts the exit code from a child process error.
 func getExitCode(err error) int {
 	if err == nil {
