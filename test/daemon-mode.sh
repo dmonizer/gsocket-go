@@ -43,8 +43,8 @@ FAILED=0
 
 TMPDIR=$(mktemp -d)
 cleanup() {
-    kill $DAEMON_PID $WORKER_PID 2>/dev/null || true
-    wait $DAEMON_PID $WORKER_PID 2>/dev/null || true
+    kill ${DAEMON_PID:-} ${WORKER_PID:-} 2>/dev/null || true
+    wait ${DAEMON_PID:-} ${WORKER_PID:-} 2>/dev/null || true
     # Clean up any lingering gs-netcat processes from our tests.
     pkill -f "gs-netcat.*TestDaemon" 2>/dev/null || true
     pkill -f "gs-netcat.*TestWD" 2>/dev/null || true
