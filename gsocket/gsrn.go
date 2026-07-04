@@ -376,12 +376,13 @@ func (g *GSRNConn) RawConn() net.Conn {
 // GSRNClient handles the full lifecycle of connecting to the GSRN
 // and completing the relay handshake.
 type GSRNClient struct {
-	gsrnHost string
-	gsrnPort int
-	addr     Addr
-	token    [TokenSize]byte
-	flags    uint8
-	socksAddr string // optional SOCKS5 proxy address
+	gsrnHost   string
+	gsrnPort   int
+	addr       Addr
+	token      [TokenSize]byte
+	flags      uint8
+	socksAddr  string // optional SOCKS5 proxy address
+	verboseLog func(format string, args ...interface{})
 
 	// Connection state
 	gsrnConn *GSRNConn
@@ -389,6 +390,11 @@ type GSRNClient struct {
 
 // GSRNClientOption configures a GSRNClient.
 type GSRNClientOption func(*GSRNClient)
+
+// WithVerboseLog enables verbose logging for GSRN connection steps.
+func WithVerboseLog(logf func(format string, args ...interface{})) GSRNClientOption {
+	return func(c *GSRNClient) { c.verboseLog = logf }
+}
 
 // WithSOCKS5 sets a SOCKS5 proxy address (e.g. "127.0.0.1:9050" for TOR).
 func WithSOCKS5(addr string) GSRNClientOption {
@@ -438,6 +444,9 @@ func (c *GSRNClient) ConnectListener() (*GSRNConn, error) {
 		return nil, fmt.Errorf("generate token: %w", err)
 	}
 	c.token = token
+	if c.verboseLog != nil {
+		c.verboseLog("sending LISTEN addr=%s token=%x", c.addr, c.token[:4])
+	}
 
 	gsrn := NewGSRNConn(conn, c.addr, c.token, c.flags, false)
 	if err := gsrn.SendListen(); err != nil {
@@ -445,6 +454,9 @@ func (c *GSRNClient) ConnectListener() (*GSRNConn, error) {
 		return nil, fmt.Errorf("send listen: %w", err)
 	}
 
+	if c.verboseLog != nil {
+		c.verboseLog("LISTEN sent — starting keepalive (45s interval)")
+	}
 	gsrn.StartKeepalive()
 	c.gsrnConn = gsrn
 	return gsrn, nil
@@ -458,6 +470,10 @@ func (c *GSRNClient) ConnectClient() (*GSRNConn, error) {
 		return nil, fmt.Errorf("connect to GSRN: %w", err)
 	}
 
+	if c.verboseLog != nil {
+		c.verboseLog("sending CONNECT addr=%s flags=0x%02x", c.addr, c.flags)
+	}
+
 	gsrn := NewGSRNConn(conn, c.addr, c.token, c.flags, true)
 	if err := gsrn.SendConnect(); err != nil {
 		conn.Close()
@@ -465,26 +481,53 @@ func (c *GSRNClient) ConnectClient() (*GSRNConn, error) {
 	}
 
 	// Wait for START or STATUS from GSRN.
+	if c.verboseLog != nil {
+		c.verboseLog("waiting for GSRN response (START or STATUS)...")
+	}
 	pktType, payload, err := gsrn.ReadPacket()
 	if err != nil {
 		conn.Close()
+		if c.verboseLog != nil {
+			c.verboseLog("GSRN read error: %v", err)
+		}
 		return nil, fmt.Errorf("read GSRN response: %w", err)
+	}
+	if c.verboseLog != nil {
+		c.verboseLog("received GSRN packet type=0x%02x (%d bytes)", pktType, len(payload))
 	}
 
 	switch pktType {
 	case pktTypeStart:
+		if c.verboseLog != nil {
+			c.verboseLog("GSRN START — server found, sending ACCEPT")
+		}
 		// Send accept.
 		if err := gsrn.SendAccept(); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("send accept: %w", err)
 		}
 	case pktTypeStatus:
+		if c.verboseLog != nil {
+			errType := payload[1]
+			code := payload[2]
+			c.verboseLog("GSRN STATUS errType=%d code=%d", errType, code)
+		}
 		if err := ParseStatus(payload); err != nil {
 			conn.Close()
+			if c.verboseLog != nil {
+				c.verboseLog("GSRN STATUS is fatal: %v", err)
+			}
 			return nil, err
+		}
+		// Non-fatal status — e.g. server exists but not ready yet.
+		if c.verboseLog != nil {
+			c.verboseLog("GSRN STATUS non-fatal — proceeding")
 		}
 	default:
 		conn.Close()
+		if c.verboseLog != nil {
+			c.verboseLog("unexpected GSRN packet type: 0x%02x", pktType)
+		}
 		return nil, fmt.Errorf("unexpected GSRN packet type: 0x%02x", pktType)
 	}
 
@@ -496,13 +539,25 @@ func (c *GSRNClient) ConnectClient() (*GSRNConn, error) {
 // WaitForClient blocks until a client connects to this listening GSRN endpoint.
 // Returns the raw connection after _gs_start is received and accepted.
 func (c *GSRNClient) WaitForClient(gsrn *GSRNConn) (*GSRNConn, error) {
+	if c.verboseLog != nil {
+		c.verboseLog("waiting for client START on addr=%s...", c.addr)
+	}
 	pktType, payload, err := gsrn.ReadPacket()
 	if err != nil {
+		if c.verboseLog != nil {
+			c.verboseLog("read error while waiting for client: %v", err)
+		}
 		return nil, fmt.Errorf("wait for client: %w", err)
+	}
+	if c.verboseLog != nil {
+		c.verboseLog("received packet type=0x%02x while waiting for client", pktType)
 	}
 
 	switch pktType {
 	case pktTypeStart:
+		if c.verboseLog != nil {
+			c.verboseLog("GSRN START — client connected, sending ACCEPT")
+		}
 		if err := gsrn.SendAccept(); err != nil {
 			return nil, fmt.Errorf("send accept: %w", err)
 		}
@@ -512,6 +567,11 @@ func (c *GSRNClient) WaitForClient(gsrn *GSRNConn) (*GSRNConn, error) {
 		}
 		return gsrn, nil
 	case pktTypeStatus:
+		if c.verboseLog != nil {
+			errType := payload[1]
+			code := payload[2]
+			c.verboseLog("GSRN STATUS errType=%d code=%d while waiting for client", errType, code)
+		}
 		if err := ParseStatus(payload); err != nil {
 			return nil, err
 		}
@@ -526,17 +586,38 @@ func (c *GSRNClient) dialGSRN() (net.Conn, error) {
 	addr := net.JoinHostPort(c.gsrnHost, fmt.Sprintf("%d", c.gsrnPort))
 
 	if c.socksAddr != "" {
-		return dialSOCKS5(c.socksAddr, addr)
+		if c.verboseLog != nil {
+			c.verboseLog("dialing GSRN via SOCKS5 proxy %s → %s", c.socksAddr, addr)
+		}
+		start := time.Now()
+		conn, err := dialSOCKS5(c.socksAddr, addr)
+		if c.verboseLog != nil {
+			c.verboseLog("SOCKS5 dial %s → %s: err=%v (%v)", c.socksAddr, addr, err, time.Since(start).Round(time.Millisecond))
+		}
+		return conn, err
 	}
 
 	// Try port 443 first, then fall back to 7351.
+	start := time.Now()
+	if c.verboseLog != nil {
+		c.verboseLog("dialing GSRN tcp %s (timeout=10s)", addr)
+	}
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
+		if c.verboseLog != nil {
+			c.verboseLog("GSRN port %d failed: %v — trying port %d", c.gsrnPort, err, gsrnDefaultPortAlt)
+		}
 		altAddr := net.JoinHostPort(c.gsrnHost, fmt.Sprintf("%d", gsrnDefaultPortAlt))
 		conn, err = net.DialTimeout("tcp", altAddr, 10*time.Second)
 		if err != nil {
+			if c.verboseLog != nil {
+				c.verboseLog("GSRN port %d also failed: %v", gsrnDefaultPortAlt, err)
+			}
 			return nil, fmt.Errorf("dial %s: %w", addr, err)
 		}
+	}
+	if c.verboseLog != nil {
+		c.verboseLog("GSRN TCP connected to %s (%v)", conn.RemoteAddr(), time.Since(start).Round(time.Millisecond))
 	}
 	return conn, nil
 }

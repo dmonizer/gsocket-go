@@ -228,16 +228,27 @@ func (p *Peer) gsrnClientOpts() []GSRNClientOption {
 	if p.socksProxyAddr != "" {
 		opts = append(opts, WithSOCKS5(p.socksProxyAddr))
 	}
+	// Wire verbose logging: GSRN connection steps are logged via the
+	// peer's logger. Format: "gsrn: <message>".
+	opts = append(opts, WithVerboseLog(func(format string, args ...interface{}) {
+		p.logger.Printf("gsrn: "+format, args...)
+	}))
 	return opts
 }
 
 // finishHandshake completes the secure channel setup after GSRN connects peers.
 func (p *Peer) finishHandshake(gsrn *GSRNConn, isServer bool) error {
+	start := time.Now()
+	p.logger.Printf("starting secure handshake (role=%s)...", map[bool]string{true: "server", false: "client"}[isServer])
+
 	channel, err := Handshake(gsrn.RawConn(), p.secret, isServer)
 	if err != nil {
 		gsrn.Close()
+		p.logger.Printf("secure handshake failed after %v: %v", time.Since(start).Round(time.Millisecond), err)
 		return fmt.Errorf("secure handshake: %w", err)
 	}
+
+	p.logger.Printf("secure handshake complete (%v)", time.Since(start).Round(time.Millisecond))
 
 	// Stop the GSRN keepalive — after the handshake the raw connection
 	// carries encrypted channel data, not GSRN protocol packets. The
