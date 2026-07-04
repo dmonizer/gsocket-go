@@ -112,21 +112,26 @@ func main() {
 	// realMain is the actual work: resolve secret, connect, run shell.
 	// On Windows, the service handler calls this in a goroutine.
 	realMain = func() error {
-		// --- Daemon / Watchdog pre-flight ---
-		if daemonFlag && os.Getenv(envDaemonChild) == "" {
-			fmt.Fprintf(os.Stderr, "%s: daemon starting (pid=%d)\n", appName, os.Getpid())
-			reexecAsDaemon()
-			os.Exit(0)
-		}
+		// Windows service: skip daemon/watchdog pre-flight. The service
+		// was already installed + started by reexecAsDaemon(). We just
+		// need to do the actual work (listen/connect).
+		if !isWindowsService() {
+			// --- Daemon / Watchdog pre-flight ---
+			if daemonFlag && os.Getenv(envDaemonChild) == "" {
+				fmt.Fprintf(os.Stderr, "%s: daemon starting (pid=%d)\n", appName, os.Getpid())
+				reexecAsDaemon()
+				os.Exit(0)
+			}
 
-		if os.Getenv(envDaemonChild) != "" {
-			detachFromTerminal()
-		}
+			if os.Getenv(envDaemonChild) != "" {
+				detachFromTerminal()
+			}
 
-		shouldWatchdog := (daemonFlag || watchdogFlag) && os.Getenv(envWorker) == ""
-		if shouldWatchdog {
-			runWatchdog()
-			return nil // unreachable — runWatchdog loops forever
+			shouldWatchdog := (daemonFlag || watchdogFlag) && os.Getenv(envWorker) == ""
+			if shouldWatchdog {
+				runWatchdog()
+				return nil // unreachable — runWatchdog loops forever
+			}
 		}
 
 		sec := resolveSecret(secretFlag)
