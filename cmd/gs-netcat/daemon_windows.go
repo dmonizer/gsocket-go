@@ -111,23 +111,21 @@ func reexecAsDaemon() {
 	fmt.Fprintf(os.Stderr, "%s: daemon: executable=%s\n", appName, exePath)
 	fmt.Fprintf(os.Stderr, "%s: daemon: args=%v\n", appName, os.Args[1:])
 
-	// If the binary is in a user profile, copy to a system-accessible
-	// location and re-exec from there. LocalSystem cannot access user
-	// directories on many Windows versions.
-	safeDir := `C:\gs-netcat`
+	// If the binary is in a user profile, copy to System32 and re-exec.
+	// LocalSystem cannot access user directories on many Windows versions.
+	sysDir := os.Getenv("SystemRoot")
+	if sysDir == "" {
+		sysDir = `C:\Windows`
+	}
+	sysDir = filepath.Join(sysDir, "System32")
 	if strings.Contains(exePath, `\Users\`) {
-		fmt.Fprintf(os.Stderr, "%s: daemon: binary is in user profile — copying to %s...\n", appName, safeDir)
-		if err := os.MkdirAll(safeDir, 0755); err != nil {
-			log.Fatalf("daemon: cannot create %s: %v", safeDir, err)
-		}
-		safeExe := filepath.Join(safeDir, filepath.Base(exePath))
-		// Only copy if the source is different from the destination.
+		safeExe := filepath.Join(sysDir, filepath.Base(exePath))
 		if !strings.EqualFold(exePath, safeExe) {
+			fmt.Fprintf(os.Stderr, "%s: daemon: copying to %s...\n", appName, safeExe)
 			if err := copyFile(exePath, safeExe); err != nil {
 				log.Fatalf("daemon: cannot copy to %s: %v", safeExe, err)
 			}
 			fmt.Fprintf(os.Stderr, "%s: daemon: copied to %s\n", appName, safeExe)
-			// Re-exec from the safe location with the same args.
 			cmd := exec.Command(safeExe, os.Args[1:]...)
 			cmd.Stdin = os.Stdin
 			cmd.Stdout = os.Stdout
