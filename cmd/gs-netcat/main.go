@@ -335,9 +335,12 @@ loop:
 func runClient(secret string, opts []gsocket.PeerOption, interactive bool) {
 	peer := gsocket.NewPeer(secret, gsocket.RoleClient, opts...)
 
-	// Only the non-interactive client exits on Ctrl-C. The interactive
-	// client forwards Ctrl-C as 0x03 to the remote shell — that handler
-	// is set up by runClientInteractive() inside peer.RunShell().
+	// Cancellable context for DialAndConnect + dialGSRN. On Ctrl-C the
+	// signal handler cancels the context, which propagates through to the
+	// GSRN dial loop (stopping hostname rotation between attempts).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	if !interactive {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt)
@@ -345,11 +348,15 @@ func runClient(secret string, opts []gsocket.PeerOption, interactive bool) {
 			<-sigCh
 			log.Printf("Interrupted, shutting down...")
 			signal.Stop(sigCh)
+			cancel()
 			peer.Close()
 		}()
 	}
 
-	if err := peer.DialAndConnect(context.Background()); err != nil {
+	if err := peer.DialAndConnect(ctx); err != nil {
+		if ctx.Err() != nil {
+			os.Exit(1) // cancelled by user
+		}
 		log.Fatalf("Connection failed: %v", err)
 	}
 	defer peer.Close()

@@ -69,6 +69,25 @@ func (a Addr) GSRNHostname() string {
 	return fmt.Sprintf("%c.%s", 'a'+id, domain)
 }
 
+// GSRNHostnames returns all 26 GSRN relay hostnames (a-z), starting from
+// the primary hostname for this address and wrapping around. If the primary
+// GSRN relay is unreachable, the caller can try the remaining hosts.
+//
+// E.g. for address with HostnameID=5 (f): [f.gs.thc.org, g.gs.thc.org, ..., z.gs.thc.org, a.gs.thc.org, ..., e.gs.thc.org]
+func (a Addr) GSRNHostnames() []string {
+	id := a.HostnameID()
+	domain := os.Getenv(envGSRNDomain)
+	if domain == "" {
+		domain = defaultGSRNDomain
+	}
+	hosts := make([]string, 26)
+	for i := 0; i < 26; i++ {
+		letter := byte('a') + byte((int(id)+i)%26)
+		hosts[i] = fmt.Sprintf("%c.%s", letter, domain)
+	}
+	return hosts
+}
+
 // DeriveKeyMaterial derives the SRP-equivalent password and GS address from
 // a shared secret. It exactly matches the C function GS_ADDR_sec2addr().
 //

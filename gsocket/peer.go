@@ -158,7 +158,7 @@ func NewPeer(secret string, role PeerRole, opts ...PeerOption) *Peer {
 // AcceptOnListener registers with GSRN as a listener and waits for a client.
 // It blocks until the secure channel is established.
 func (p *Peer) AcceptOnListener(ctx context.Context) error {
-	opts := p.gsrnClientOpts()
+	opts := p.gsrnClientOpts(ctx)
 	client, err := NewGSRNClient(p.secret, opts...)
 	if err != nil {
 		return fmt.Errorf("create GSRN client: %w", err)
@@ -185,7 +185,7 @@ func (p *Peer) AcceptOnListener(ctx context.Context) error {
 // It blocks until the secure channel is established. If sockWait is true, it
 // retries every 2 seconds until a server appears (matching C's GS_OPT_SOCKWAIT).
 func (p *Peer) DialAndConnect(ctx context.Context) error {
-	opts := append(p.gsrnClientOpts(), WithFlags(flagProtoLowLatency))
+	opts := append(p.gsrnClientOpts(ctx), WithFlags(flagProtoLowLatency))
 
 	for {
 		client, err := NewGSRNClient(p.secret, opts...)
@@ -223,10 +223,14 @@ func (p *Peer) DialAndConnect(ctx context.Context) error {
 }
 
 // gsrnClientOpts builds GSRNClient options from the peer's configuration.
-func (p *Peer) gsrnClientOpts() []GSRNClientOption {
+// If ctx is non-nil, it's used for cancellation during dial (host rotation).
+func (p *Peer) gsrnClientOpts(ctx context.Context) []GSRNClientOption {
 	var opts []GSRNClientOption
 	if p.socksProxyAddr != "" {
 		opts = append(opts, WithSOCKS5(p.socksProxyAddr))
+	}
+	if ctx != nil {
+		opts = append(opts, WithContext(ctx))
 	}
 	// Wire verbose logging: GSRN connection steps are logged via the
 	// peer's logger. Format: "gsrn: <message>".

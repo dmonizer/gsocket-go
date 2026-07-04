@@ -2,6 +2,7 @@ package gsocket
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -376,16 +377,25 @@ func (g *GSRNConn) RawConn() net.Conn {
 // GSRNClient handles the full lifecycle of connecting to the GSRN
 // and completing the relay handshake.
 type GSRNClient struct {
-	gsrnHost   string
+	gsrnHosts  []string // all 26 GSRN hosts to try (primary first)
 	gsrnPort   int
 	addr       Addr
 	token      [TokenSize]byte
 	flags      uint8
 	socksAddr  string // optional SOCKS5 proxy address
 	verboseLog func(format string, args ...interface{})
+	ctx        context.Context // cancellation context for dial
 
 	// Connection state
 	gsrnConn *GSRNConn
+}
+
+// primaryHost returns the first (preferred) GSRN hostname.
+func (c *GSRNClient) primaryHost() string {
+	if len(c.gsrnHosts) > 0 {
+		return c.gsrnHosts[0]
+	}
+	return ""
 }
 
 // GSRNClientOption configures a GSRNClient.
@@ -403,6 +413,12 @@ func WithSOCKS5(addr string) GSRNClientOption {
 	}
 }
 
+// WithContext sets the cancellation context for GSRN dial attempts.
+// When the context is cancelled, dialGSRN stops trying remaining hosts.
+func WithContext(ctx context.Context) GSRNClientOption {
+	return func(c *GSRNClient) { c.ctx = ctx }
+}
+
 // WithFlags sets protocol flags for the connect packet.
 func WithFlags(flags uint8) GSRNClientOption {
 	return func(c *GSRNClient) {
@@ -418,13 +434,14 @@ func NewGSRNClient(secret string, opts ...GSRNClientOption) (*GSRNClient, error)
 		addr:     addr,
 		gsrnPort: gsrnDefaultPort,
 		flags:    flagProtoLowLatency,
+		ctx:      context.Background(),
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
 
-	// Resolve GSRN hostname.
-	c.gsrnHost = addr.GSRNHostname()
+	// Resolve GSRN hostname list (26 hosts, primary first).
+	c.gsrnHosts = addr.GSRNHostnames()
 
 	return c, nil
 }
@@ -582,10 +599,13 @@ func (c *GSRNClient) WaitForClient(gsrn *GSRNConn) (*GSRNConn, error) {
 }
 
 // dialGSRN establishes a TCP connection to the GSRN relay.
+// It tries each GSRN hostname in sequence (a-z.gs.thc.org), starting from
+// the primary host derived from the address. For each host, it tries port
+// 443 first, then 7351. This provides resilience when a specific GSRN
+// relay node is unreachable.
 func (c *GSRNClient) dialGSRN() (net.Conn, error) {
-	addr := net.JoinHostPort(c.gsrnHost, fmt.Sprintf("%d", c.gsrnPort))
-
 	if c.socksAddr != "" {
+		addr := net.JoinHostPort(c.primaryHost(), fmt.Sprintf("%d", c.gsrnPort))
 		if c.verboseLog != nil {
 			c.verboseLog("dialing GSRN via SOCKS5 proxy %s → %s", c.socksAddr, addr)
 		}
@@ -597,29 +617,40 @@ func (c *GSRNClient) dialGSRN() (net.Conn, error) {
 		return conn, err
 	}
 
-	// Try port 443 first, then fall back to 7351.
-	start := time.Now()
-	if c.verboseLog != nil {
-		c.verboseLog("dialing GSRN tcp %s (timeout=10s)", addr)
-	}
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
-	if err != nil {
-		if c.verboseLog != nil {
-			c.verboseLog("GSRN port %d failed: %v — trying port %d", c.gsrnPort, err, gsrnDefaultPortAlt)
-		}
-		altAddr := net.JoinHostPort(c.gsrnHost, fmt.Sprintf("%d", gsrnDefaultPortAlt))
-		conn, err = net.DialTimeout("tcp", altAddr, 10*time.Second)
-		if err != nil {
+	ports := []int{gsrnDefaultPort, gsrnDefaultPortAlt}
+	var lastErr error
+
+	for _, host := range c.gsrnHosts {
+		// Check for cancellation between hostname attempts so Ctrl-C
+		// doesn't leave the user waiting through 26 × 10s timeouts.
+		if err := c.ctx.Err(); err != nil {
 			if c.verboseLog != nil {
-				c.verboseLog("GSRN port %d also failed: %v", gsrnDefaultPortAlt, err)
+				c.verboseLog("dial cancelled: %v", err)
 			}
-			return nil, fmt.Errorf("dial %s: %w", addr, err)
+			return nil, err
+		}
+		for _, port := range ports {
+			addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+			start := time.Now()
+			if c.verboseLog != nil {
+				c.verboseLog("dialing GSRN tcp %s (timeout=10s)", addr)
+			}
+			conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+			if err != nil {
+				if c.verboseLog != nil {
+					c.verboseLog("GSRN %s: %v (%v)", addr, err, time.Since(start).Round(time.Millisecond))
+				}
+				lastErr = err
+				continue
+			}
+			if c.verboseLog != nil {
+				c.verboseLog("GSRN TCP connected to %s (%v)", conn.RemoteAddr(), time.Since(start).Round(time.Millisecond))
+			}
+			return conn, nil
 		}
 	}
-	if c.verboseLog != nil {
-		c.verboseLog("GSRN TCP connected to %s (%v)", conn.RemoteAddr(), time.Since(start).Round(time.Millisecond))
-	}
-	return conn, nil
+	// All 26 × 2 = 52 attempts failed.
+	return nil, fmt.Errorf("dial %s: %w", c.primaryHost(), lastErr)
 }
 
 // generateRandomToken creates a random 16-byte token using crypto/rand.
