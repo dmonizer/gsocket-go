@@ -1,0 +1,28 @@
+# Binaries
+gs-netcat
+gs-netcat-linux
+gs-netcat-linux-amd64
+gs-netcat.exe
+gs-netcat-darwin
+gs-netcat-darwin-arm64
+
+# Build output
+*.exe
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Dependencies (vendored)
+vendor/
