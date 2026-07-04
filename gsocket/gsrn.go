@@ -573,46 +573,55 @@ func (c *GSRNClient) ConnectClient() (*GSRNConn, error) {
 
 // WaitForClient blocks until a client connects to this listening GSRN endpoint.
 // Returns the raw connection after _gs_start is received and accepted.
+// PONG (keepalive reply) packets are consumed and discarded.
 func (c *GSRNClient) WaitForClient(gsrn *GSRNConn) (*GSRNConn, error) {
 	if c.verboseLog != nil {
 		c.verboseLog("waiting for client START on addr=%s...", c.addr)
 	}
-	pktType, payload, err := gsrn.ReadPacket()
-	if err != nil {
-		if c.verboseLog != nil {
-			c.verboseLog("read error while waiting for client: %v", err)
-		}
-		return nil, fmt.Errorf("wait for client: %w", err)
-	}
-	if c.verboseLog != nil {
-		c.verboseLog("received packet type=0x%02x while waiting for client", pktType)
-	}
-
-	switch pktType {
-	case pktTypeStart:
-		if c.verboseLog != nil {
-			c.verboseLog("GSRN START — client connected, sending ACCEPT")
-		}
-		if err := gsrn.SendAccept(); err != nil {
-			return nil, fmt.Errorf("send accept: %w", err)
-		}
-		_, err := ParseStart(payload)
+	for {
+		pktType, payload, err := gsrn.ReadPacket()
 		if err != nil {
-			return nil, err
+			if c.verboseLog != nil {
+				c.verboseLog("read error while waiting for client: %v", err)
+			}
+			return nil, fmt.Errorf("wait for client: %w", err)
 		}
-		return gsrn, nil
-	case pktTypeStatus:
 		if c.verboseLog != nil {
-			errType := payload[1]
-			code := payload[2]
-			c.verboseLog("GSRN STATUS errType=%d code=%d while waiting for client", errType, code)
+			c.verboseLog("received packet type=0x%02x while waiting for client", pktType)
 		}
-		if err := ParseStatus(payload); err != nil {
-			return nil, err
+
+		switch pktType {
+		case pktTypePong:
+			// Keepalive reply from GSRN — consume and continue waiting.
+			if c.verboseLog != nil {
+				c.verboseLog("consumed keepalive PONG, continuing to wait")
+			}
+			continue
+		case pktTypeStart:
+			if c.verboseLog != nil {
+				c.verboseLog("GSRN START — client connected, sending ACCEPT")
+			}
+			if err := gsrn.SendAccept(); err != nil {
+				return nil, fmt.Errorf("send accept: %w", err)
+			}
+			_, err := ParseStart(payload)
+			if err != nil {
+				return nil, err
+			}
+			return gsrn, nil
+		case pktTypeStatus:
+			if c.verboseLog != nil {
+				errType := payload[1]
+				code := payload[2]
+				c.verboseLog("GSRN STATUS errType=%d code=%d while waiting for client", errType, code)
+			}
+			if err := ParseStatus(payload); err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("unexpected status while waiting for client")
+		default:
+			return nil, fmt.Errorf("unexpected packet type while waiting: 0x%02x", pktType)
 		}
-		return nil, fmt.Errorf("unexpected status while waiting for client")
-	default:
-		return nil, fmt.Errorf("unexpected packet type while waiting: 0x%02x", pktType)
 	}
 }
 
