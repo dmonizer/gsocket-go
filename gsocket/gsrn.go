@@ -662,12 +662,17 @@ func (c *GSRNClient) dialGSRN() (net.Conn, error) {
 			if c.verboseLog != nil {
 				c.verboseLog("dialing GSRN tcp %s (timeout=10s)", addr)
 			}
-			conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+			dialer := net.Dialer{Timeout: 10 * time.Second}
+			conn, err := dialer.DialContext(c.ctx, "tcp", addr)
 			if err != nil {
 				if c.verboseLog != nil {
 					c.verboseLog("GSRN %s: %v (%v)", addr, err, time.Since(start).Round(time.Millisecond))
 				}
 				lastErr = err
+				// If context was cancelled, stop trying more hosts.
+				if c.ctx.Err() != nil {
+					return nil, c.ctx.Err()
+				}
 				continue
 			}
 			if c.verboseLog != nil {

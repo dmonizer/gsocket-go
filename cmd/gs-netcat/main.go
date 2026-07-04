@@ -364,14 +364,15 @@ loop:
 				log.Printf("Session ended: %v", err)
 			}
 		}(nextPeer)
-		go func(p *gsocket.Peer) {
-			<-ctx.Done()
-			p.Close()
-		}(nextPeer)
+
 	}
 
-	// Wait for the last session to end.
-	<-done
+	// Wait for the last session to end (with timeout on shutdown).
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		log.Printf("Timed out waiting for session to end.")
+	}
 }
 
 func runClient(secret string, opts []gsocket.PeerOption, interactive bool) {
