@@ -51,9 +51,9 @@ func (cr *ConsoleReader) SetConsoleMode(on bool) {
 	cr.consoleMode = on
 }
 
-// CmdBuf returns the current command buffer contents.
+// CmdBuf returns a copy of the current command buffer contents.
 func (cr *ConsoleReader) CmdBuf() []byte {
-	return cr.cmdBuf
+	return append([]byte{}, cr.cmdBuf...)
 }
 
 // Read reads data from the underlying reader and filters Ctrl-E escape

@@ -104,18 +104,13 @@ func (c *Console) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
 }
 
-// Write writes shell output to the terminal, respecting the scroll region.
-// Uses cursor save/restore so the status bar is never overwritten.
+// Write writes shell output to the terminal. The scroll region
+// (set by Init) confines scrolling to the upper area automatically.
 func (c *Console) Write(data []byte) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
 	}
-	// Save cursor, write data, restore cursor. The scroll region
-	// confines scrolling to the upper area automatically.
-	fmt.Fprint(os.Stdout, "\033[s")
-	n, err := os.Stdout.Write(data)
-	fmt.Fprint(os.Stdout, "\033[u")
-	return n, err
+	return os.Stdout.Write(data)
 }
 
 // Close resets the terminal to normal operation.
@@ -151,6 +146,7 @@ func (c *Console) SetBPS(up, down int64) {
 	c.bpsUp = up
 	c.bpsDown = down
 	c.mu.Unlock()
+	c.drawStatusBar()
 }
 
 // SetComment sets a transient comment in the status bar (e.g. "pwd: /home/user").
@@ -177,12 +173,13 @@ func (c *Console) HandleWinch(rows, cols int) {
 	c.mu.Lock()
 	c.rows = rows
 	c.cols = cols
+	focusConsoleMode := c.focus == focusConsole
 	c.mu.Unlock()
 	if c.rows > 2 {
 		fmt.Fprintf(os.Stdout, "\033[1;%dr", c.rows-2)
 	}
 	c.drawStatusBar()
-	if c.focus == focusConsole {
+	if focusConsoleMode {
 		c.redrawCommandLine()
 	}
 }
@@ -191,14 +188,18 @@ func (c *Console) HandleWinch(rows, cols int) {
 
 // enterCommandMode switches focus to the console command line.
 func (c *Console) enterCommandMode() {
+	c.mu.Lock()
 	c.focus = focusConsole
+	c.mu.Unlock()
 	c.reader.SetConsoleMode(true)
 	c.redrawCommandLine()
 }
 
 // exitCommandMode switches focus back to the shell.
 func (c *Console) exitCommandMode() {
+	c.mu.Lock()
 	c.focus = focusShell
+	c.mu.Unlock()
 	c.reader.SetConsoleMode(false)
 	// Clear the command line.
 	if c.rows > 0 {
@@ -208,9 +209,11 @@ func (c *Console) exitCommandMode() {
 
 // shutdown closes the console (Ctrl-E + c).
 func (c *Console) shutdown() {
+	c.mu.Lock()
 	c.running = false
-	c.reader.SetConsoleMode(false)
 	c.focus = focusShell
+	c.mu.Unlock()
+	c.reader.SetConsoleMode(false)
 	// Clear command line.
 	if c.rows > 0 {
 		fmt.Fprintf(os.Stdout, "\033[s\033[%d;1H\033[K\033[u", c.rows)
