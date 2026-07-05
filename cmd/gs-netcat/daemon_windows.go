@@ -155,12 +155,12 @@ func reexecAsDaemon() {
 	defer m.Disconnect()
 	fmt.Fprintf(os.Stderr, "%s: daemon: connected to SCM\n", appName)
 
-	// Build the service binary path: executable + args (no quotes).
-	// s.Start() args are only one-shot start params, not permanent —
-	// they must be in the binary path so os.Args sees them every time.
-	cmd := exePath
+	// Build the binary path: quote only the exe, leave args unquoted.
+	// svchost style: "C:\...\svchost.exe" -k args
+	// If we quote the entire string, SCM can't parse it.
+	cmd := fmt.Sprintf(`"%s"`, exePath)
 	if len(svcArgs) > 0 {
-		cmd = exePath + " " + strings.Join(svcArgs, " ")
+		cmd += " " + strings.Join(svcArgs, " ")
 	}
 	fmt.Fprintf(os.Stderr, "%s: daemon: service binary path: %s\n", appName, cmd)
 
