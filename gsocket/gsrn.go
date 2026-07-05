@@ -379,8 +379,8 @@ type GSRNClient struct {
 	gsrnConn *GSRNConn
 }
 
-// primaryHost returns the first (preferred) GSRN hostname.
-func (c *GSRNClient) primaryHost() string {
+// PrimaryHost returns the first (preferred) GSRN hostname.
+func (c *GSRNClient) PrimaryHost() string {
 	if len(c.gsrnHosts) > 0 {
 		return c.gsrnHosts[0]
 	}
@@ -621,7 +621,7 @@ func (c *GSRNClient) WaitForClient(gsrn *GSRNConn) (*GSRNConn, error) {
 // relay node is unreachable.
 func (c *GSRNClient) dialGSRN() (net.Conn, error) {
 	if c.socksAddr != "" {
-		addr := net.JoinHostPort(c.primaryHost(), fmt.Sprintf("%d", c.gsrnPort))
+		addr := net.JoinHostPort(c.PrimaryHost(), fmt.Sprintf("%d", c.gsrnPort))
 		if c.verboseLog != nil {
 			c.verboseLog("dialing GSRN via SOCKS5 proxy %s → %s", c.socksAddr, addr)
 		}
@@ -671,7 +671,58 @@ func (c *GSRNClient) dialGSRN() (net.Conn, error) {
 		}
 	}
 	// All 26 × 2 = 52 attempts failed.
-	return nil, fmt.Errorf("dial %s: %w", c.primaryHost(), lastErr)
+	return nil, fmt.Errorf("dial %s: %w", c.PrimaryHost(), lastErr)
+}
+
+// ProbeServer checks whether a server is listening for the given secret.
+// It connects to GSRN with flagProtoServerCheck, which tells the relay
+// to report server presence without establishing a full connection.
+// Returns nil if a server is listening, or an error describing the result.
+func (c *GSRNClient) ProbeServer() error {
+	conn, err := c.dialGSRN()
+	if err != nil {
+		return fmt.Errorf("connect to GSRN: %w", err)
+	}
+	defer conn.Close()
+
+	if c.verboseLog != nil {
+		c.verboseLog("sending CONNECT (server check) addr=%s", c.addr)
+	}
+
+	flags := c.flags | flagProtoServerCheck
+	gsrn := NewGSRNConn(conn, c.addr, c.token, flags, true)
+	if err := gsrn.SendConnect(); err != nil {
+		return fmt.Errorf("send connect: %w", err)
+	}
+
+	if c.verboseLog != nil {
+		c.verboseLog("waiting for GSRN response (server check)...")
+	}
+
+	pktType, payload, err := gsrn.ReadPacket()
+	if err != nil {
+		return fmt.Errorf("read GSRN response: %w", err)
+	}
+
+	if c.verboseLog != nil {
+		c.verboseLog("received GSRN packet type=0x%02x (%d bytes)", pktType, len(payload))
+	}
+
+	switch pktType {
+	case pktTypeStatus:
+		if len(payload) >= 4 && payload[2] == statusCodeServerOK {
+			if c.verboseLog != nil {
+				c.verboseLog("GSRN: server IS listening")
+			}
+			return nil
+		}
+		if err := ParseStatus(payload); err != nil {
+			return err
+		}
+		return fmt.Errorf("unexpected status response")
+	default:
+		return fmt.Errorf("unexpected GSRN packet type: 0x%02x (expected STATUS)", pktType)
+	}
 }
 
 // generateRandomToken creates a random 16-byte token using crypto/rand.

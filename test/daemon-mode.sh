@@ -14,42 +14,11 @@
 #   ./test/daemon-mode.sh
 set -euo pipefail
 
-GS_NETCAT="${GS_NETCAT:-./gs-netcat}"
+TESTDIR="$(cd "$(dirname "$0")" && pwd)"
+source "$TESTDIR/test_helper.sh"
+resolve_binary
+setup_tmpdir
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-pass() { echo -e "${GREEN}PASS${NC} $*"; }
-fail() { echo -e "${RED}FAIL${NC} $*"; exit 1; }
-info() { echo -e "${YELLOW}INFO${NC} $*"; }
-
-# --- check binary ---
-if [ ! -x "$GS_NETCAT" ]; then
-    if [ -f "./cmd/gs-netcat/main.go" ]; then
-        info "Building gs-netcat..."
-        (cd "$(dirname "$0")/.." && go build -o gs-netcat ./cmd/gs-netcat) || fail "build failed"
-        GS_NETCAT="./gs-netcat"
-    else
-        fail "gs-netcat binary not found at $GS_NETCAT"
-    fi
-fi
-
-# Only run daemon tests on Linux (setsid is Unix-specific).
-if [ "$(uname -s)" != "Linux" ]; then
-    info "Skipping daemon tests on non-Linux platform ($(uname -s))"
-    exit 0
-fi
-
-PASSED=0
-FAILED=0
-
-TMPDIR=$(mktemp -d)
-cleanup() {
-    kill ${DAEMON_PID:-} ${WORKER_PID:-} 2>/dev/null || true
-    wait ${DAEMON_PID:-} ${WORKER_PID:-} 2>/dev/null || true
-    # Clean up any lingering gs-netcat processes from our tests.
-    pkill -f "gs-netcat.*TestDaemon" 2>/dev/null || true
-    pkill -f "gs-netcat.*TestWD" 2>/dev/null || true
-    rm -rf "$TMPDIR"
-}
 trap cleanup EXIT
 
 # --- Test 1: -D parent exits, child stays resident ---
@@ -64,26 +33,22 @@ ELAPSED=$(($(date +%s) - START_TIME))
 
 if [ "$ELAPSED" -lt 3 ]; then
     pass "Daemon parent exited quickly (${ELAPSED}s)"
-    PASSED=$((PASSED + 1))
-else
+    else
     fail "Daemon parent took too long to exit (${ELAPSED}s)"
-    FAILED=$((FAILED + 1))
-fi
+    fi
 
 # Look for the daemon child. It should be running.
 sleep 1
 DAEMON_PID=$(pgrep -f "gs-netcat.*TestDaemon1" 2>/dev/null | head -1 || true)
 if [ -n "$DAEMON_PID" ]; then
     pass "Daemon child is resident (pid=$DAEMON_PID)"
-    PASSED=$((PASSED + 1))
-else
+    else
     info "Daemon child may have exited quickly (GSRN unavailable). Checking..."
     # With -D -l, the daemon watchdog spawns a worker that tries GSRN.
     # If GSRN fails immediately, worker exits. Watchdog restarts after 60s delay.
     # In that case, worker is between restarts.
     # This is acceptable — the daemon infrastructure works.
-    PASSED=$((PASSED + 1))
-fi
+    fi
 
 # Kill the daemon if it exists.
 if [ -n "${DAEMON_PID:-}" ]; then
@@ -101,16 +66,13 @@ if [ -n "$DAEMON_PID" ]; then
     TTY=$(ps -o tty= -p "$DAEMON_PID" 2>/dev/null | tr -d ' ' || echo "?")
     if [ "$TTY" = "?" ]; then
         pass "Daemon has no controlling terminal (tty=?)"
-        PASSED=$((PASSED + 1))
-    else
+            else
         info "Daemon tty=$TTY"
-        PASSED=$((PASSED + 1))
-    fi
+            fi
     kill $DAEMON_PID 2>/dev/null || true
 else
     info "Daemon not found — skipping tty check"
-    PASSED=$((PASSED + 1))
-fi
+    fi
 
 # --- Test 3: Daemon cwd is / and fds go to /dev/null ---
 info "Test 3: Daemon working directory is /, stdio → /dev/null"
@@ -127,19 +89,15 @@ if [ -n "$DAEMON_PID" ]; then
 
     if [ "$CWD" = "/" ]; then
         pass "Daemon cwd is /"
-        PASSED=$((PASSED + 1))
-    else
+            else
         info "Daemon cwd=$CWD"
-        PASSED=$((PASSED + 1))
-    fi
+            fi
 
     if [ "$STDIN" = "/dev/null" ]; then
         pass "Daemon stdin → /dev/null"
-        PASSED=$((PASSED + 1))
-    else
+            else
         info "Daemon stdin=$STDIN"
-        PASSED=$((PASSED + 1))
-    fi
+            fi
     kill $DAEMON_PID 2>/dev/null || true
 else
     info "Daemon not found — skipping fd checks"
@@ -156,13 +114,11 @@ wait $WPID 2>/dev/null || true
 STDERR4=$(cat "$TMPDIR/stderr4" 2>/dev/null || true)
 if echo "$STDERR4" | grep -qi "DIED"; then
     pass "Watchdog detected crash and printed DIED message"
-    PASSED=$((PASSED + 1))
-
+    
     DIED_COUNT=$(echo "$STDERR4" | grep -ci "DIED" || echo "0")
     if [ "$DIED_COUNT" -ge 1 ]; then
         pass "Watchdog restarted worker (DIED count: $DIED_COUNT)"
-        PASSED=$((PASSED + 1))
-    fi
+            fi
 else
     info "Watchdog output: $(head -3 "$TMPDIR/stderr4")"
     PASSED=$((PASSED + 2))
@@ -180,19 +136,15 @@ EXIT_CODE=$?
 STDERR5=$(cat "$TMPDIR/stderr5" 2>/dev/null || true)
 if [ "$EXIT_CODE" != "124" ]; then
     pass "Watchdog exited on its own after BAD_AUTH loop (exit=$EXIT_CODE)"
-    PASSED=$((PASSED + 1))
-else
+    else
     info "Watchdog was killed by timeout (may have kept restarting)"
-    PASSED=$((PASSED + 1))
-fi
+    fi
 
 if echo "$STDERR5" | grep -qi "another daemon\|BAD_AUTH"; then
     pass "Watchdog reported BAD_AUTH / duplicate daemon detection"
-    PASSED=$((PASSED + 1))
-else
+    else
     info "Watchdog output: $(head -3 "$TMPDIR/stderr5")"
-    PASSED=$((PASSED + 1))
-fi
+    fi
 
 # --- Test 6: -D implies watchdog (matching C) ---
 info "Test 6: -D alone implies watchdog (auto-restart)"
@@ -205,19 +157,10 @@ sleep 1
 DAEMON_PID=$(pgrep -f "gs-netcat.*TestDaemon6" 2>/dev/null | head -1 || true)
 if [ -n "$DAEMON_PID" ]; then
     pass "-D daemon running (implies watchdog)"
-    PASSED=$((PASSED + 1))
-    kill $DAEMON_PID 2>/dev/null || true
+        kill $DAEMON_PID 2>/dev/null || true
 else
     info "Daemon exited (GSRN may be unavailable — daemon infrastructure works)"
-    PASSED=$((PASSED + 1))
-fi
+    fi
 
-# --- Summary ---
-echo ""
-echo "===================="
-echo "Results: $PASSED passed, $FAILED failed"
-echo "===================="
-
-if [ "$FAILED" -gt 0 ]; then
-    exit 1
-fi
+print_summary
+exit_on_failure

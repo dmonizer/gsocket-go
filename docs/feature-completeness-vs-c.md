@@ -63,12 +63,12 @@ to each other. From a security standpoint the Go protocol is actually stronger
 |---|---|---|---|
 | `-l` | ✅ | ✅ | Listen mode |
 | `-s <secret>` | ✅ | ✅ | Shared secret |
-| `-k <keyfile>` | ✅ | ❌ | Read secret from key file |
+| `-k <keyfile>` | ✅ | ✅ | Read secret from key file |
 | `-i` | ✅ | ✅ | Interactive shell |
 | `-e <cmd>` | ✅ | ✅ | Execute command on connection |
 | `-d <IP>` | ✅ | ✅ | Destination IP for TCP forwarding |
 | `-p <port>` | ✅ | ✅ | Port for listen or forward |
-| `-t` | ✅ | ❌ | Check if server is listening (probe only) |
+| `-t` | ✅ | ✅ | Check if server is listening (probe only) |
 | `-S` | ✅ | ✅ | Act as SOCKS server (needs `-l`) |
 | `-D` | ✅ | ✅ | Daemon mode (fork & background, includes watchdog) |
 | `-W` | ✅ | ✅ | Watchdog mode (auto-restart on crash) |
@@ -78,10 +78,10 @@ to each other. From a security standpoint the Go protocol is actually stronger
 | `--tor` | ✅ | ✅ | TOR via SOCKS5 (`127.0.0.1:9050`) |
 | `-m` | ✅ | ❌ | Display man page |
 | `-w` | ✅ | ✅ | Wait for server to become available |
-| `-q` | ✅ | ❌ | Quiet mode |
+| `-q` | ✅ | ✅ | Quiet mode — suppress all output |
 | `-v` | ✅ | ✅ | Verbose output |
 | `-g` | ✅ | ✅ | Generate a random secret and exit |
-| `-L <file>` | ✅ | ❌ | Log to file |
+| `-L <file>` | ✅ | ✅ | Log to file |
 | `-C` | ✅ | ❌ | Console status bar |
 | `GSOCKET_SECRET` env | ✅ | ✅ | |
 | `GSOCKET_ARGS` env | ✅ | ❌ | Additional CLI args from env |
@@ -322,7 +322,7 @@ ordering, and integration with the `select()` loop for timing.
 | GSRN wire protocol | **85%** | Core works; missing multi-sox and auto-reconnect |
 | Address derivation | **100%** | Identical to C |
 | Crypto | **100%*** | Different but equivalent security; not wire-compatible with C |
-| CLI flags | **58%** | Basic + SOCKS + UDP + daemon + watchdog + `-T`; missing `-k`, `-t`, `-q`, `-r`, `-C`, etc. |
+| CLI flags | **70%** | Major flags done: `-s`, `-l`, `-i`, `-e`, `-d`, `-p`, `-D`, `-W`, `-S`, `-u`, `-T`, `-w`, `-v`, `-g`, `-k`, `-t`, `-q`, `-L`, `--tor`; missing `-r`, `-m`, `-C` |
 | Interactive shell | **75%** | PTY + resize + NOPTY + Ctrl-E escape + app keepalive; missing full console UI + commands |
 | App protocol parser | **85%** | Parsing works; WSIZE/PING/PONG/LOG/STATUS callbacks wired; PWD/IDS still unhandled |
 | File transfer | **5%** | Only channel-type constants defined |
@@ -335,7 +335,7 @@ ordering, and integration with the `select()` loop for timing.
 | Statistics / logging | **20%** | Byte counters only; no formatting, rates, or logs |
 | Tests | **100%** | 33 tests covering protocol, crypto, appproto, and SOCKS5 |
 | Portability | **100%** | Pure Go → Linux, macOS, Windows native |
-| **OVERALL** | **~68%** | Core + SOCKS5 + multi-peer + UDP + daemon + watchdog + Windows service + interactive shell complete |
+| **OVERALL** | **~70%** | Core + SOCKS5 + multi-peer + UDP + daemon + watchdog + Windows service + interactive shell + all major CLI flags complete |
 
 ---
 
@@ -348,8 +348,8 @@ ordering, and integration with the `select()` loop for timing.
 | ~~Daemon + watchdog mode~~ | ~~Medium~~ ✅ Done |
 | ~~Windows service + stealth naming~~ | ~~Medium~~ ✅ Done |
 | ~~Ctrl-E console escape handling~~ | ~~Small~~ ✅ Done |
+| ~~CLI flags: -k, -t, -q, -L~~ | ~~Small~~ ✅ Done |
 | PWD/IDS message handlers | Small |
-| Log to file (`-L`), quiet mode, env-var GSRN opts | Small |
 | Multi-sox backlog for faster re-accept | Medium |
 | Auto-reconnect & DNS re-resolution | Medium |
 | Statistics formatting & disconnect summary | Medium |
@@ -357,4 +357,4 @@ ordering, and integration with the `select()` loop for timing.
 | Console system (status bar, Ctrl-E commands) | **Large** |
 | IDS subsystem (utmp monitoring + peer notifications) | Medium |
 | Event manager | Medium |
-| Remaining CLI flags (`-k`, `-t`, `-q`, `-r`, `-C`) | Small–Medium |
+| Remaining CLI flags (`-r`, `-m`, `-C`) | Small–Medium |

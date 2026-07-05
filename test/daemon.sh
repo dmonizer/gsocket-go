@@ -11,38 +11,11 @@
 #   ./test/daemon.sh
 set -euo pipefail
 
-GS_NETCAT="${GS_NETCAT:-./gs-netcat}"
+TESTDIR="$(cd "$(dirname "$0")" && pwd)"
+source "$TESTDIR/test_helper.sh"
+resolve_binary
+setup_tmpdir
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-pass() { echo -e "${GREEN}PASS${NC} $*"; }
-fail() { echo -e "${RED}FAIL${NC} $*"; exit 1; }
-info() { echo -e "${YELLOW}INFO${NC} $*"; }
-
-# --- check binary ---
-if [ ! -x "$GS_NETCAT" ]; then
-    if [ -f "./cmd/gs-netcat/main.go" ]; then
-        info "Building gs-netcat..."
-        (cd "$(dirname "$0")/.." && go build -o gs-netcat ./cmd/gs-netcat) || fail "build failed"
-        GS_NETCAT="./gs-netcat"
-    else
-        fail "gs-netcat binary not found at $GS_NETCAT"
-    fi
-fi
-
-PASSED=0
-FAILED=0
-
-cleanup() {
-    # Kill any lingering test daemons.
-    if [ -n "${CHILD_PID:-}" ]; then
-        kill "$CHILD_PID" 2>/dev/null || true
-        wait "$CHILD_PID" 2>/dev/null || true
-    fi
-    if [ -n "${PARENT_PID:-}" ]; then
-        kill "$PARENT_PID" 2>/dev/null || true
-        wait "$PARENT_PID" 2>/dev/null || true
-    fi
-}
 trap cleanup EXIT
 
 # We need a command that keeps the daemon alive long enough for us to inspect
@@ -79,11 +52,9 @@ CHILD_PID=$(pgrep -f "gs-netcat.*DaemonTest1" 2>/dev/null | head -1 || true)
 
 if [ -n "$CHILD_PID" ]; then
     pass "Daemon child running (pid=$CHILD_PID)"
-    PASSED=$((PASSED + 1))
-else
+    else
     fail "No daemon child found"
-    FAILED=$((FAILED + 1))
-    exit 1
+        exit 1
 fi
 
 # --- Test 2: Daemon child has no controlling terminal ---
@@ -91,10 +62,8 @@ info "Test 2: Daemon child has no controlling terminal"
 TTY=$(ps -o tty= -p "$CHILD_PID" 2>/dev/null | tr -d ' ' || echo "?")
 if [ "$TTY" = "?" ] || [ "$TTY" = "?" ]; then
     pass "Daemon has no controlling terminal (tty=$TTY)"
-    PASSED=$((PASSED + 1))
-else
-    info "Daemon tty=$TTY (may still be attached if setsid not fully effective)"
-    PASSED=$((PASSED + 1))  # Not a hard fail — some envs behave differently
+    else
+    info "Daemon tty=$TTY (may still be attached if setsid not fully effective)"  # Not a hard fail — some envs behave differently
 fi
 
 # --- Test 3: Daemon child working directory is / ---
@@ -102,36 +71,21 @@ info "Test 3: Daemon child working directory is /"
 CWD=$(readlink -f /proc/"$CHILD_PID"/cwd 2>/dev/null || echo "unknown")
 if [ "$CWD" = "/" ]; then
     pass "Daemon working directory is /"
-    PASSED=$((PASSED + 1))
-else
+    else
     info "Daemon cwd=$CWD (may differ if /proc not available or chdir failed)"
-    PASSED=$((PASSED + 1))
-fi
+    fi
 
 # --- Test 4: Daemon child has no open stdin (points to /dev/null) ---
 info "Test 4: Daemon stdin is /dev/null"
 STDIN_LINK=$(readlink -f /proc/"$CHILD_PID"/fd/0 2>/dev/null || echo "unknown")
 if [ "$STDIN_LINK" = "/dev/null" ]; then
     pass "Daemon stdin is /dev/null"
-    PASSED=$((PASSED + 1))
-else
+    else
     info "Daemon stdin=$STDIN_LINK"
-    PASSED=$((PASSED + 1))
-fi
+    fi
 
 # --- Test 5: Only one daemon instance runs (second -D with same options) ---
 # Actually this requires GSRN to test BAD_AUTH. Skip.
 
-# --- Summary ---
-echo ""
-echo "===================="
-echo "Results: $PASSED passed, $FAILED failed"
-echo "===================="
-
-# Cleanup.
-kill "$CHILD_PID" 2>/dev/null || true
-wait "$CHILD_PID" 2>/dev/null || true
-
-if [ "$FAILED" -gt 0 ]; then
-    exit 1
-fi
+print_summary
+exit_on_failure

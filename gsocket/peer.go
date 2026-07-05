@@ -52,6 +52,7 @@ type Peer struct {
 	isUDP         bool   // use UDP transport with length-prefix framing
 	socksProxyAddr string // SOCKS5 proxy address for GSRN connections
 	sockWait      bool   // wait for server to become available (-w)
+	quiet         bool   // suppress non-essential output (-q)
 	logger        *log.Logger
 
 	// Internal state.
@@ -153,6 +154,11 @@ func WithLogger(l *log.Logger) PeerOption {
 	return func(p *Peer) { p.logger = l }
 }
 
+// WithQuiet suppresses non-essential output messages (matching C's -q flag).
+func WithQuiet() PeerOption {
+	return func(p *Peer) { p.quiet = true }
+}
+
 // NewPeer creates a new Peer with the given shared secret and role.
 func NewPeer(secret string, role PeerRole, opts ...PeerOption) *Peer {
 	p := &Peer{
@@ -180,7 +186,7 @@ func (p *Peer) AcceptOnListener(ctx context.Context) error {
 		client.SetToken(p.gsrnToken)
 	}
 
-	p.logger.Printf("Registering on %s", client.primaryHost())
+	p.logger.Printf("Registering on %s", client.PrimaryHost())
 
 	gsrn, err := client.ConnectListener()
 	if err != nil {
@@ -211,9 +217,9 @@ func (p *Peer) DialAndConnect(ctx context.Context) error {
 		p.gsrnClient = client
 
 		if p.sockWait {
-			p.logger.Printf("Waiting for server on %s...", client.primaryHost())
+			p.logger.Printf("Waiting for server on %s...", client.PrimaryHost())
 		} else {
-			p.logger.Printf("Connecting to %s", client.primaryHost())
+			p.logger.Printf("Connecting to %s", client.PrimaryHost())
 		}
 
 		gsrn, err := client.ConnectClient()
@@ -318,7 +324,9 @@ func (p *Peer) RunShell() error {
 		return p.runSOCKSServer()
 	}
 
-	fmt.Fprintf(os.Stderr, "GS tunnel established. Press Ctrl-C to exit.\r\n")
+	if !p.quiet {
+		fmt.Fprintf(os.Stderr, "GS tunnel established. Press Ctrl-C to exit.\r\n")
+	}
 
 	if p.execCmd != "" {
 		return p.runExecCmd()
