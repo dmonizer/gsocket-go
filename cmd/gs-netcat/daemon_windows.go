@@ -176,9 +176,10 @@ func reexecAsDaemon() {
 
 	fmt.Fprintf(os.Stderr, "%s: daemon: calling startService('%s')...\n", appName, serviceName)
 	if err := startService(m, serviceName); err != nil {
-		os.Exit(0)
-			fmt.Fprintf(os.Stderr, "%s: Check that %s is accessible by LocalSystem.\n", appName, servicePath)
-			fmt.Fprintf(os.Stderr, "%s:   sc delete %s\n", appName, serviceName)
+		fmt.Fprintf(os.Stderr, "%s: daemon: startService failed: %v\n", appName, err)
+		fmt.Fprintf(os.Stderr, "%s: Check that %s is accessible by LocalSystem.\n", appName, servicePath)
+		fmt.Fprintf(os.Stderr, "%s:   sc delete %s\n", appName, serviceName)
+		log.Fatalf("daemon: service installed but could not be started")
 	}
 	os.Exit(0)
 }

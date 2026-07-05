@@ -251,7 +251,7 @@ func (p *Peer) gsrnClientOpts(ctx context.Context) []GSRNClientOption {
 	}
 	// Wire verbose logging: GSRN connection steps are logged via the
 	// peer's logger. Format: "gsrn: <message>".
-	opts = append(opts, WithVerboseLog(func(format string, args ...interface{}) {
+	opts = append(opts, WithVerboseLog(func(format string, args ...any) {
 		p.logger.Printf("gsrn: "+format, args...)
 	}))
 	return opts
@@ -260,7 +260,11 @@ func (p *Peer) gsrnClientOpts(ctx context.Context) []GSRNClientOption {
 // finishHandshake completes the secure channel setup after GSRN connects peers.
 func (p *Peer) finishHandshake(gsrn *GSRNConn, isServer bool) error {
 	start := time.Now()
-	p.logger.Printf("starting secure handshake (role=%s)...", map[bool]string{true: "server", false: "client"}[isServer])
+	roleStr := "client"
+	if isServer {
+		roleStr = "server"
+	}
+	p.logger.Printf("starting secure handshake (role=%s)...", roleStr)
 
 	channel, err := Handshake(gsrn.RawConn(), p.secret, isServer)
 	if err != nil {

@@ -69,8 +69,6 @@ const (
 	gsAcceptSize  = 32
 	gsStatusSize  = 32
 
-	// Max message across all packet types.
-	gsMaxMsgLen = 128
 )
 
 // Protocol errors.
@@ -82,8 +80,6 @@ var (
 	ErrGSRNProtoError    = errors.New("gsocket: protocol error")
 	ErrGSRNNetError      = errors.New("gsocket: network error")
 	ErrGSRNNeedUpdate    = errors.New("gsocket: client needs update")
-	ErrGSRNAuthFailedStr = "address already in use"
-	ErrGSRNConnRefusedStr = "connection refused (no server listening)"
 )
 
 // raw packet structs — must match C layout exactly.
@@ -147,15 +143,8 @@ type gsStatusPacket struct {
 	Msg     [28]uint8
 }
 
-// readFullPacket reads exactly size bytes from r into a buffer.
-func readFullPacket(r io.Reader, size int) ([]byte, error) {
-	buf := make([]byte, size)
-	_, err := io.ReadFull(r, buf)
-	return buf, err
-}
-
 // sendPacket marshals a struct to binary and writes it to w.
-func sendPacket(w io.Writer, pkt interface{}) error {
+func sendPacket(w io.Writer, pkt any) error {
 	var buf bytes.Buffer
 	if err := binary.Write(&buf, binary.BigEndian, pkt); err != nil {
 		return fmt.Errorf("marshal packet: %w", err)
@@ -383,7 +372,7 @@ type GSRNClient struct {
 	token      [TokenSize]byte
 	flags      uint8
 	socksAddr  string // optional SOCKS5 proxy address
-	verboseLog func(format string, args ...interface{})
+	verboseLog func(format string, args ...any)
 	ctx        context.Context // cancellation context for dial
 
 	// Connection state
@@ -402,7 +391,7 @@ func (c *GSRNClient) primaryHost() string {
 type GSRNClientOption func(*GSRNClient)
 
 // WithVerboseLog enables verbose logging for GSRN connection steps.
-func WithVerboseLog(logf func(format string, args ...interface{})) GSRNClientOption {
+func WithVerboseLog(logf func(format string, args ...any)) GSRNClientOption {
 	return func(c *GSRNClient) { c.verboseLog = logf }
 }
 

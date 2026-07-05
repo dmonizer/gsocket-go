@@ -142,7 +142,7 @@ func main() {
 
 		logger := log.New(os.Stderr, appName+": ", log.LstdFlags)
 		if !verboseFlag {
-			logger.SetOutput(os.Stderr)
+			logger.SetOutput(io.Discard)
 		}
 
 		var opts []gsocket.PeerOption

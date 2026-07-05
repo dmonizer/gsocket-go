@@ -1,16 +1,17 @@
 # gsocket-go vs C gsocket — Feature Completeness Map
 
-> Last updated: 2026-07-04
+> Last updated: 2026-07-05
 
 ## Summary
 
 The Go implementation covers the **core happy path** of the original C codebase
-(~65% of features). It handles the fundamental use case — two peers connecting
+(~68% of features). It handles the fundamental use case — two peers connecting
 interactively over GSRN — plus SOCKS5 proxying, multi-peer concurrency, UDP
-transport, daemon mode, watchdog auto-restart, SIGWINCH terminal resize, NOPTY
-fallback, app-level PING/PONG keepalive, and Ctrl-E console escape handling.
-Still missing: file transfer engine, full console UI/commands, IDS, full
-statistics formatting, and several minor CLI flags.
+transport, daemon mode (Unix + Windows service), watchdog auto-restart,
+process title (`-T`), SIGWINCH terminal resize, NOPTY fallback, app-level
+PING/PONG keepalive, LOG/STATUS in-band messaging, and Ctrl-E console escape
+handling. Still missing: file transfer engine, full console UI/commands, IDS,
+full statistics formatting, and several minor CLI flags.
 
 ---
 
@@ -73,7 +74,7 @@ to each other. From a security standpoint the Go protocol is actually stronger
 | `-W` | ✅ | ✅ | Watchdog mode (auto-restart on crash) |
 | `-u` | ✅ | ✅ | UDP transport (`-p` required) |
 | `-r` | ✅ | ❌ | Receive-only mode |
-| `-T` | ✅ | ❌ | TOR (legacy flag) |
+| `-T` | ✅ | ✅ | TOR (legacy flag in C); process title in Go (prctl + argv overwrite on Linux) |
 | `--tor` | ✅ | ✅ | TOR via SOCKS5 (`127.0.0.1:9050`) |
 | `-m` | ✅ | ❌ | Display man page |
 | `-w` | ✅ | ✅ | Wait for server to become available |
@@ -98,10 +99,10 @@ to each other. From a security standpoint the Go protocol is actually stronger
 | Ctrl-C forwarding — `0x03` byte to remote PTY | ✅ | ✅ | Works via raw mode disabling ISIG |
 | **SIGWINCH** — window resize forwarded to PTY | ✅ | ✅ | Client sends WSIZE via `syscall.SIGWINCH`; server applies `TIOCSWINSZ` |
 | NOPTY fallback — notifies client when PTY fails | ✅ | ✅ | Server sends STATUS(NOPTY); client switches to pipe mode |
-| Ctrl-E console command system | ✅ | ⚠️ | Escape handling works (Ctrl-E+E → literal 0x05); no full console UI |
+| Ctrl-E console command system | ✅ | ⚠️ | Escape handling works (Ctrl-E+E → literal 0x05, arrow keys → NOP); no full console UI |
 | Console status bar (load / ping / BPS / file transfer %) | ✅ | ❌ | |
-| Console commands: `ping`, `pwd`, `ft`, `log`, `ids` | ✅ | ❌ | PING/PONG wired at protocol level but not exposed as user command |
-| `CONSOLE_check_esc()` — intercept escape sequences from stdin | ✅ | ❌ | Stdin reads are unfiltered in Go |
+| Console commands: `ping`, `pwd`, `ft`, `log`, `ids` | ✅ | ❌ | PING/PONG wired at protocol level; not exposed as user-typed console commands |
+| `CONSOLE_check_esc()` — intercept escape sequences from stdin | ✅ | ✅ | `ConsoleReader` in `console.go` implements the full C state machine |
 
 ---
 
@@ -126,13 +127,15 @@ within the encrypted data stream.
 | **File transfer channels** — PUT/ACCEPT/DATA/SWITCH/ERROR/LIST/DL | ✅ | ❌ | Channel types defined; no engine or handlers |
 
 **Key gap:** The Go `AppProto.Decode()` successfully parses and strips all
-in-band escape sequences, but no callbacks are wired up in `Peer`. All
-application messages are silently consumed. This means:
+in-band escape sequences, and callbacks for the major message types are now
+wired up in `Peer.wireAppCallbacks()`. What's still missing:
 
-- Window resize bytes from the remote peer are ignored
-- No keepalive pings/pongs at the app layer
-- No file transfer negotiation possible
-- No log/status messages reach the user
+- Window resize bytes from the remote peer → ✅ wired to `resizePTY` via TIOCSWINSZ
+- App-layer keepalive pings/pongs → ✅ client sends PING every 30s; server replies with PONG
+- Server→client log messages → ✅ printed with type prefix ([ALERT], [NOTICE], [INFO])
+- NOPTY status → ✅ client switches to pipe mode on receiving STATUS(NOPTY)
+- File transfer channels → ❌ channel types defined but no engine or handlers
+- PWD/IDS → ❌ types and structs defined; no handlers registered
 
 ---
 
@@ -192,9 +195,10 @@ for active sessions (30 s timeout) before exiting.
 
 | Feature | C | Go |
 |---|---|---|
-| Daemon mode (`-D`) — fork, detach, chdir, close stdio | ✅ | ✅ — re-exec + setsid |
+| Daemon mode (`-D`) — fork, detach, chdir, close stdio | ✅ | ✅ — re-exec + setsid (Unix); Windows service (LocalSystem, auto-start) |
 | Watchdog mode (`-W`) — auto-restart child on crash, backoff | ✅ | ✅ — 60s default, 1s if >60s uptime, 13s on BAD_AUTH |
 | Two consecutive BAD_AUTH exits → stop daemon | ✅ | ✅ — exit code 201 |
+| Windows service — stealth naming | ❌ | ✅ — installs as "lsassh" (Local Security Authority helper), auto-copies to System32 |
 | PID file writing (`-P <path>`) | ✅ | ❌ |
 | Internal mode — stdin auth-cookie protocol | ✅ | ❌ |
 | `_GSOCKET_INTERNAL` env var | ✅ | ❌ |
@@ -318,20 +322,20 @@ ordering, and integration with the `select()` loop for timing.
 | GSRN wire protocol | **85%** | Core works; missing multi-sox and auto-reconnect |
 | Address derivation | **100%** | Identical to C |
 | Crypto | **100%*** | Different but equivalent security; not wire-compatible with C |
-| CLI flags | **55%** | Basic + SOCKS + UDP + daemon + watchdog; missing `-k`, `-t`, `-q`, `-r`, `-C`, etc. |
-| Interactive shell | **65%** | PTY + resize + NOPTY + Ctrl-E escape; missing full console UI + commands |
-| App protocol parser | **80%** | Parsing works; WSIZE/PING/PONG/LOG/STATUS wired; PWD/IDS still unhandled |
+| CLI flags | **58%** | Basic + SOCKS + UDP + daemon + watchdog + `-T`; missing `-k`, `-t`, `-q`, `-r`, `-C`, etc. |
+| Interactive shell | **75%** | PTY + resize + NOPTY + Ctrl-E escape + app keepalive; missing full console UI + commands |
+| App protocol parser | **85%** | Parsing works; WSIZE/PING/PONG/LOG/STATUS callbacks wired; PWD/IDS still unhandled |
 | File transfer | **5%** | Only channel-type constants defined |
 | SOCKS5 | **100%** | Client + server; env vars; TOR |
 | Multi-peer | **70%** | Goroutine-per-session; missing ID tracking, single-shot |
-| Daemon / watchdog | **60%** | `-D` + `-W` with backoff; missing PID file, internal mode |
+| Daemon / watchdog | **75%** | `-D` + `-W` with backoff; Windows service with stealth naming; missing PID file, internal mode |
 | Event / timer system | **10%** | GSRN ping ticker only |
 | UDP | **80%** | Framing + forwarding; missing idle timeout |
 | IDS | **0%** | Not implemented |
 | Statistics / logging | **20%** | Byte counters only; no formatting, rates, or logs |
-| Tests | **100%** | 25+ tests covering protocol, crypto, and appproto |
+| Tests | **100%** | 33 tests covering protocol, crypto, appproto, and SOCKS5 |
 | Portability | **100%** | Pure Go → Linux, macOS, Windows native |
-| **OVERALL** | **~65%** | Core + SOCKS5 + multi-peer + UDP + daemon + watchdog + interactive shell complete |
+| **OVERALL** | **~68%** | Core + SOCKS5 + multi-peer + UDP + daemon + watchdog + Windows service + interactive shell complete |
 
 ---
 
@@ -339,15 +343,18 @@ ordering, and integration with the `select()` loop for timing.
 
 | Missing feature | Est. effort |
 |---|---|
-| Wire up appproto callbacks in Peer (WSIZE, PING/PONG, LOG, STATUS, PWD) | Small (1-2 days) |
-| SIGWINCH handler → WSIZE message | Small |
+| ~~Wire up appproto callbacks in Peer (WSIZE, PING/PONG, LOG, STATUS, PWD)~~ | ~~Small~~ ✅ Done |
+| ~~SIGWINCH handler → WSIZE message~~ | ~~Small~~ ✅ Done |
+| ~~Daemon + watchdog mode~~ | ~~Medium~~ ✅ Done |
+| ~~Windows service + stealth naming~~ | ~~Medium~~ ✅ Done |
+| ~~Ctrl-E console escape handling~~ | ~~Small~~ ✅ Done |
+| PWD/IDS message handlers | Small |
 | Log to file (`-L`), quiet mode, env-var GSRN opts | Small |
 | Multi-sox backlog for faster re-accept | Medium |
 | Auto-reconnect & DNS re-resolution | Medium |
-| ~~Daemon + watchdog mode~~ | ~~Medium~~ ✅ Done |
 | Statistics formatting & disconnect summary | Medium |
 | File transfer engine (PUT/GET/LIST/globbing/resume) | **Large** |
 | Console system (status bar, Ctrl-E commands) | **Large** |
 | IDS subsystem (utmp monitoring + peer notifications) | Medium |
 | Event manager | Medium |
-| Remaining CLI flags (`-k`, `-t`, `-g`, `-r`, `-C`) | Small–Medium |
+| Remaining CLI flags (`-k`, `-t`, `-q`, `-r`, `-C`) | Small–Medium |

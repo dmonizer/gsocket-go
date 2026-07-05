@@ -209,7 +209,9 @@ func TestSOCKSServeUnsupportedCommand(t *testing.T) {
 	req := []byte{0x05, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 	clientEnd.Write(req)
 
-	// Read error reply.
+	// Read error reply. SOCKS5 replies are variable-length; the header
+	// is 4 bytes followed by bind address (IPv4 = 6 more bytes, 10 total).
+	// Must read the full reply to avoid deadlocking net.Pipe (synchronous).
 	hdr := make([]byte, 4)
 	if _, err := io.ReadFull(clientEnd, hdr); err != nil {
 		t.Fatalf("read reply: %v", err)
@@ -217,6 +219,8 @@ func TestSOCKSServeUnsupportedCommand(t *testing.T) {
 	if hdr[1] != socks5RepCmdNotSupported {
 		t.Errorf("reply code = %d, want %d (command not supported)", hdr[1], socks5RepCmdNotSupported)
 	}
+	// Drain the bind address so the writer doesn't deadlock.
+	drainSocks5Addr(clientEnd, hdr[3])
 
 	wg.Wait()
 	if serveErr == nil {
@@ -269,9 +273,11 @@ func TestSOCKSServeHostUnreachable(t *testing.T) {
 	req = append(req, 0x00, 0x01) // port 1
 	clientEnd.Write(req)
 
-	// Read error reply.
-	hdr := make([]byte, 4)
-	io.ReadFull(clientEnd, hdr)
+	// Read error reply (full — must drain bind address to avoid Pipe deadlock).
+	replyCode := readSocks5Reply(t, clientEnd)
+	if replyCode != socks5RepHostUnreachable && replyCode != socks5RepConnRefused {
+		t.Logf("reply code = %d (expected host unreachable or connection refused)", replyCode)
+	}
 
 	wg.Wait()
 	if serveErr == nil {
@@ -381,6 +387,7 @@ func TestSOCKSServeIPv6(t *testing.T) {
 	// Read reply (will be an error since IPv6 echo unlikely to be listening).
 	hdr := make([]byte, 4)
 	io.ReadFull(clientEnd, hdr)
+	drainSocks5Addr(clientEnd, hdr[3])
 
 	wg.Wait()
 	// Either success (if IPv6 echo works) or host unreachable — both valid;
@@ -453,6 +460,20 @@ func TestSOCKSServeFQDN(t *testing.T) {
 		t.Errorf("FQDN echo: got %q, want %q", reply, msg)
 	}
 }
+
+// readSocks5Reply reads a full SOCKS5 reply (header + bind address) from r
+// and returns the reply code. Must be used instead of a partial ReadFull
+// when testing over net.Pipe to avoid deadlocks (Pipe writes are synchronous).
+func readSocks5Reply(t *testing.T, r io.Reader) byte {
+	t.Helper()
+	hdr := make([]byte, 4)
+	if _, err := io.ReadFull(r, hdr); err != nil {
+		t.Fatalf("read reply header: %v", err)
+	}
+	drainSocks5Addr(r, hdr[3])
+	return hdr[1]
+}
+
 
 func TestSendSocks5Reply(t *testing.T) {
 	tests := []struct {
