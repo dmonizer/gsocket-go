@@ -1077,6 +1077,9 @@ func (p *Peer) startBPSTicker() {
 	for {
 		select {
 		case <-ticker.C:
+			if p.consoleUI != nil && !p.consoleUI.Running() {
+				return // console closed via Ctrl-E + c
+			}
 			now := time.Now()
 			elapsed := now.Sub(lastTime).Seconds()
 			if elapsed <= 0 {

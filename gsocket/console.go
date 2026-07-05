@@ -138,6 +138,8 @@ func (cr *ConsoleReader) handleConsoleEscape(c byte) {
 		if cr.onCloseConsole != nil {
 			cr.onCloseConsole()
 		}
+	case 0x1B: // ESC — from arrow keys (terminals send ESC [ A/B/C/D)
+		cr.consumeArrowBracket()
 	case '[':
 		cr.readArrowSequence()
 	default:
@@ -159,6 +161,10 @@ func (cr *ConsoleReader) forwardEscape(c byte, p []byte) int {
 		// Ctrl-E + E/e/Ctrl-E → literal Ctrl-E byte.
 		p[0] = GS_CONSOLE_ESC
 		return 1
+	case 0x1B: // ESC — from arrow keys (terminals send ESC [ A/B/C/D)
+		// Consume the '[' and direction byte.
+		cr.consumeArrowBracket()
+		return 0
 	case '[':
 		cr.readArrowSequence()
 		return 0
@@ -167,6 +173,18 @@ func (cr *ConsoleReader) forwardEscape(c byte, p []byte) int {
 		p[0] = c
 		return 1
 	}
+}
+
+// consumeArrowBracket reads the '[' byte and delegates to readArrowSequence.
+// Called when we already received 0x1B (ESC) which some terminals emit as
+// part of the arrow-key sequence \033[A / \033[B.
+func (cr *ConsoleReader) consumeArrowBracket() {
+	b := make([]byte, 1)
+	_, _ = cr.src.Read(b)
+	if b[0] == '[' {
+		cr.readArrowSequence()
+	}
+	// If not '[' — drop the byte, sequence is malformed.
 }
 
 // handleConsoleChar processes a regular (non-escape) byte in console mode.
