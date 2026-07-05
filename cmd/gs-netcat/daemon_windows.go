@@ -155,10 +155,10 @@ func reexecAsDaemon() {
 	defer m.Disconnect()
 	fmt.Fprintf(os.Stderr, "%s: daemon: connected to SCM\n", appName)
 
-	// Build the binary path: quote only the exe, leave args unquoted.
-	// svchost style: "C:\...\svchost.exe" -k args
-	// If we quote the entire string, SCM can't parse it.
-	cmd := fmt.Sprintf(`"%s"`, exePath)
+	// Build the binary path: exe + space + args, no quotes at all.
+	// Matching svchost format: C:\Windows\System32\svchost.exe -k args
+	// The SCM parses this natively when the exe path has no spaces.
+	cmd := exePath
 	if len(svcArgs) > 0 {
 		cmd += " " + strings.Join(svcArgs, " ")
 	}
