@@ -298,6 +298,9 @@ func (p *Peer) registerWinchHandler() {
 					continue
 				}
 				_ = p.sendWSIZE(rows, cols)
+				if p.consoleUI != nil {
+					p.consoleUI.HandleWinch(int(rows), int(cols))
+				}
 			case <-p.done:
 				signal.Stop(sigCh)
 				return

@@ -68,6 +68,9 @@ type Peer struct {
 	// Console state (client side).
 	consoleReader *ConsoleReader
 
+	// Console UI state (client side, -C flag).
+	consoleUI *Console
+
 	// App-level ping state.
 	pingTicker   *time.Ticker
 	pingSentTime int64 // unix nano when last ping was sent
@@ -157,6 +160,12 @@ func WithLogger(l *log.Logger) PeerOption {
 // WithQuiet suppresses non-essential output messages (matching C's -q flag).
 func WithQuiet() PeerOption {
 	return func(p *Peer) { p.quiet = true }
+}
+
+// WithConsole enables the Ctrl-E split-screen console UI (status bar, commands).
+// Only meaningful on the client side in interactive mode.
+func WithConsole() PeerOption {
+	return func(p *Peer) { p.consoleUI = NewConsole(os.Stdin) }
 }
 
 // NewPeer creates a new Peer with the given shared secret and role.
@@ -519,7 +528,7 @@ func (p *Peer) runInteractive() error {
 // runClientInteractive sets up the local terminal for interactive use with a
 // remote shell: raw mode (no local echo, char-by-char input), Ctrl-C
 // forwarding (sends 0x03 byte instead of killing gs-netcat), Ctrl-E console
-// escape handling, and SIGWINCH forwarding for terminal resize.
+// escape handling and (optionally) split-screen UI, and SIGWINCH forwarding.
 func (p *Peer) runClientInteractive() error {
 	// Start app-level keepalive pings (every 30 s, matching C).
 	p.startAppPing()
@@ -536,21 +545,32 @@ func (p *Peer) runClientInteractive() error {
 	}
 	defer term.Restore(fd, oldState)
 
-	// Register SIGWINCH handler — when the terminal is resized, capture
-	// the new dimensions and send a WSIZE message to the server.
+	// Register SIGWINCH handler. If console UI is active, also notify
+	// the Console so it can adjust the scroll region.
 	p.registerWinchHandler()
 
-	// Wrap stdin with ConsoleReader to handle Ctrl-E escape sequences.
-	// Ctrl-E + E/Ctrl-E sends literal 0x05 through the channel (for emacs
-	// and other applications that use Ctrl-E).
-	cr := NewConsoleReader(os.Stdin)
+	// Wire Console command dispatch if console UI is active.
+	if p.consoleUI != nil {
+		p.consoleUI.OnCommand = p.handleConsoleCommand
+		p.consoleUI.Init()
+		defer p.consoleUI.Close()
+		go p.startBPSTicker()
+	}
+
+	// Choose the stdin reader: Console (with UI) or bare ConsoleReader.
+	var stdinReader io.Reader
+	if p.consoleUI != nil {
+		stdinReader = p.consoleUI
+	} else {
+		stdinReader = NewConsoleReader(os.Stdin)
+	}
 
 	// Stdin → Channel.
 	go func() {
 		defer p.Close()
 		buf := make([]byte, 8192)
 		for {
-			n, err := cr.Read(buf)
+			n, err := stdinReader.Read(buf)
 			if n > 0 {
 				if _, werr := p.channel.Write(buf[:n]); werr != nil {
 					return
@@ -575,7 +595,11 @@ func (p *Peer) runClientInteractive() error {
 				return derr
 			}
 			if len(plaintext) > 0 {
-				os.Stdout.Write(plaintext)
+				if p.consoleUI != nil {
+					p.consoleUI.Write(plaintext)
+				} else {
+					os.Stdout.Write(plaintext)
+				}
 			}
 			p.mu.Lock()
 			p.bytesRead += int64(n)
@@ -586,6 +610,44 @@ func (p *Peer) runClientInteractive() error {
 			// stdin→channel goroutine stuck on terminal read.
 			os.Stdin.Close()
 			return nil
+		}
+	}
+}
+
+// handleConsoleCommand dispatches console commands typed after Ctrl-E + down arrow.
+func (p *Peer) handleConsoleCommand(cmd string) {
+	switch cmd {
+	case "ping":
+		// Send an immediate PING and set comment until PONG arrives.
+		ping := AppPing{}
+		p.mu.Lock()
+		p.pingSentTime = time.Now().UnixNano()
+		p.mu.Unlock()
+		var buf bytes.Buffer
+		if err := binary.Write(&buf, binary.BigEndian, ping); err != nil {
+			return
+		}
+		if err := p.app.SendMessage(msgPing, buf.Bytes()); err != nil {
+			p.consoleUI.SetComment("ping failed")
+		} else {
+			p.consoleUI.SetComment("ping sent...")
+		}
+	case "pwd":
+		// Request remote working directory.
+		if err := p.app.SendMessage(msgPWDReq, nil); err != nil {
+			p.consoleUI.SetComment("pwd failed")
+		} else {
+			p.consoleUI.SetComment("pwd...")
+		}
+	case "log":
+		p.consoleUI.SetComment("log: not implemented")
+	case "ids":
+		p.consoleUI.SetComment("IDS: not implemented")
+	case "clear":
+		p.consoleUI.SetComment("")
+	default:
+		if cmd != "" {
+			p.consoleUI.SetComment("unknown: " + cmd)
 		}
 	}
 }
@@ -912,6 +974,10 @@ func (p *Peer) wireAppCallbacks() {
 		if sentAt > 0 {
 			rtt := time.Since(time.Unix(0, sentAt))
 			p.logger.Printf("PONG received (RTT %v)", rtt.Round(time.Microsecond))
+			if p.consoleUI != nil {
+				p.consoleUI.SetPingRTT(rtt)
+				p.consoleUI.SetComment("") // clear "ping sent..." comment
+			}
 		}
 		return nil
 	})
@@ -953,6 +1019,26 @@ func (p *Peer) wireAppCallbacks() {
 		}
 		return nil
 	})
+
+		// PWDReq â working directory request from client â server replies.
+		p.app.OnMessage(msgPWDReq, func(msgType uint8, data []byte) error {
+			if p.role != RoleServer {
+				return nil
+			}
+			wd, err := os.Getwd()
+			if err != nil {
+				wd = err.Error()
+			}
+			return p.app.SendChannel(chnPWD-chnOffset, []byte(wd))
+		})
+
+		// chnPWD â working directory reply from server â client.
+		p.app.OnChannel(chnPWD-chnOffset, func(msgType uint8, data []byte) error {
+			if p.consoleUI != nil {
+				p.consoleUI.SetComment("pwd: " + string(data))
+			}
+			return nil
+		})
 }
 
 // startAppPing starts periodic application-level ping messages.
@@ -978,4 +1064,50 @@ func (p *Peer) startAppPing() {
 			}
 		}
 	}()
+}
+
+// startBPSTicker computes bytes-per-second using an exponential moving
+// average (matching C's console BPS calculation) and pushes updates
+// to the Console UI every second.
+func (p *Peer) startBPSTicker() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	var lastRead, lastWritten int64
+	var smoothUp, smoothDown float64
+	lastTime := time.Now()
+
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			elapsed := now.Sub(lastTime).Seconds()
+			if elapsed <= 0 {
+				elapsed = 1
+			}
+			lastTime = now
+
+			p.mu.Lock()
+			currentRead := p.bytesRead
+			currentWritten := p.bytesWritten
+			p.mu.Unlock()
+
+			instantUp := float64(currentRead-lastRead) / elapsed
+			instantDown := float64(currentWritten-lastWritten) / elapsed
+
+			// Exponential moving average: weight of 0.125 to new sample.
+			smoothUp = smoothUp*0.875 + instantUp*0.125
+			smoothDown = smoothDown*0.875 + instantDown*0.125
+
+			lastRead = currentRead
+			lastWritten = currentWritten
+
+			if p.consoleUI != nil {
+				p.consoleUI.SetBPS(int64(smoothDown), int64(smoothUp))
+			}
+
+		case <-p.done:
+			return
+		}
+	}
 }
