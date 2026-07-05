@@ -89,7 +89,8 @@ func main() {
 		keyFile     = flag.String("k", "", "Read shared secret from key file")
 		quiet       = flag.Bool("q", false, "Quiet mode — suppress all output")
 		logFile     = flag.String("L", "", "Log to file instead of stderr")
-	)
+			consoleUI   = flag.Bool("C", false, "Enable console status bar and commands (Ctrl-E)")
+		)
 	flag.Parse()
 
 	// -L <file>: redirect all log output to a file.
@@ -142,6 +143,7 @@ func main() {
 	daemonFlag := *daemon
 	watchdogFlag := *watchdog
 	quietFlag := *quiet
+	consoleUIFlag := *consoleUI
 
 	// realMain is the actual work: resolve secret, connect, run shell.
 	// On Windows, the service handler calls this in a goroutine.
@@ -207,6 +209,9 @@ func main() {
 			}
 		if waitFlag {
 			opts = append(opts, gsocket.WithSockWait())
+		}
+		if consoleUIFlag {
+			opts = append(opts, gsocket.WithConsole())
 		}
 		if listenFlag {
 			runListener(sec, opts)
