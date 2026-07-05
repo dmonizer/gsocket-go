@@ -155,14 +155,14 @@ func reexecAsDaemon() {
 	defer m.Disconnect()
 	fmt.Fprintf(os.Stderr, "%s: daemon: connected to SCM\n", appName)
 
-	// Build the binary path: exe + space + args, no quotes at all.
-	// Matching svchost format: C:\Windows\System32\svchost.exe -k args
-	// The SCM parses this natively when the exe path has no spaces.
-	cmd := exePath
-	if len(svcArgs) > 0 {
-		cmd += " " + strings.Join(svcArgs, " ")
-	}
-	fmt.Fprintf(os.Stderr, "%s: daemon: service binary path: %s\n", appName, cmd)
+	// CreateService uses syscall.EscapeArg on the exe path and each
+	// variadic arg SEPARATELY, then joins them. We must pass args
+	// individually — not as part of the exe path string — otherwise
+	// the entire thing gets escaped as one argument (wrapped in quotes).
+	// This produces the correct svchost-style binary path:
+	//   "C:\...\gs-netcat.exe" -s secret -l -v -i
+	fmt.Fprintf(os.Stderr, "%s: daemon: service exe: %s\n", appName, exePath)
+	fmt.Fprintf(os.Stderr, "%s: daemon: service args: %v\n", appName, svcArgs)
 
 	// Check if service already exists — delete stale one.
 	s, err := m.OpenService(serviceName)
@@ -178,16 +178,18 @@ func reexecAsDaemon() {
 		fmt.Fprintf(os.Stderr, "%s: daemon: OpenService('%s'): %s (service does not exist yet)\n", appName, serviceName, winErr(err))
 	}
 
-	// Create the service. ServiceType defaults to SERVICE_WIN32_OWN_PROCESS.
-	fmt.Fprintf(os.Stderr, "%s: daemon: calling CreateService('%s', ...)\n", appName, serviceName)
+	// Create the service — args passed separately so each gets
+	// properly escaped by syscall.EscapeArg in CreateService.
+	fmt.Fprintf(os.Stderr, "%s: daemon: calling CreateService('%s', exe, config, args...)\n", appName, serviceName)
 	s, err = m.CreateService(
 		serviceName,
-		cmd,
+		exePath,
 		mgr.Config{
 			DisplayName: serviceName,
 			Description: serviceDesc,
 			StartType:   mgr.StartAutomatic,
 		},
+		svcArgs..., // ← each arg escaped separately, produces correct path
 	)
 	if err != nil {
 		log.Fatalf("daemon: CreateService('%s') failed: %s", serviceName, winErr(err))
