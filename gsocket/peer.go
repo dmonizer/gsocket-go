@@ -1020,25 +1020,25 @@ func (p *Peer) wireAppCallbacks() {
 		return nil
 	})
 
-		// PWDReq â working directory request from client â server replies.
-		p.app.OnMessage(msgPWDReq, func(msgType uint8, data []byte) error {
-			if p.role != RoleServer {
-				return nil
-			}
-			wd, err := os.Getwd()
-			if err != nil {
-				wd = err.Error()
-			}
-			return p.app.SendChannel(chnPWD-chnOffset, []byte(wd))
-		})
-
-		// chnPWD â working directory reply from server â client.
-		p.app.OnChannel(chnPWD-chnOffset, func(msgType uint8, data []byte) error {
-			if p.consoleUI != nil {
-				p.consoleUI.SetComment("pwd: " + string(data))
-			}
+	// PWDReq â working directory request from client â server replies.
+	p.app.OnMessage(msgPWDReq, func(msgType uint8, data []byte) error {
+		if p.role != RoleServer {
 			return nil
-		})
+		}
+		wd, err := os.Getwd()
+		if err != nil {
+			wd = err.Error()
+		}
+		return p.app.SendChannel(chnPWD-chnOffset, []byte(wd))
+	})
+
+	// chnPWD â working directory reply from server â client.
+	p.app.OnChannel(chnPWD-chnOffset, func(msgType uint8, data []byte) error {
+		if p.consoleUI != nil {
+			p.consoleUI.SetComment("pwd: " + string(data))
+		}
+		return nil
+	})
 }
 
 // startAppPing starts periodic application-level ping messages.
@@ -1073,8 +1073,8 @@ func (p *Peer) startBPSTicker() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	var lastRead, lastWritten int64
-	var smoothUp, smoothDown float64
+	var lastRecv, lastSent int64
+	var smoothRecv, smoothSent float64
 	lastTime := time.Now()
 
 	for {
@@ -1088,22 +1088,22 @@ func (p *Peer) startBPSTicker() {
 			lastTime = now
 
 			p.mu.Lock()
-			currentRead := p.bytesRead
-			currentWritten := p.bytesWritten
+			currentRecv := p.bytesRead
+			currentSent := p.bytesWritten
 			p.mu.Unlock()
 
-			instantUp := float64(currentRead-lastRead) / elapsed
-			instantDown := float64(currentWritten-lastWritten) / elapsed
+			instantRecv := float64(currentRecv-lastRecv) / elapsed
+			instantSent := float64(currentSent-lastSent) / elapsed
 
 			// Exponential moving average: weight of 0.125 to new sample.
-			smoothUp = smoothUp*0.875 + instantUp*0.125
-			smoothDown = smoothDown*0.875 + instantDown*0.125
+			smoothRecv = smoothRecv*0.875 + instantRecv*0.125
+			smoothSent = smoothSent*0.875 + instantSent*0.125
 
-			lastRead = currentRead
-			lastWritten = currentWritten
+			lastRecv = currentRecv
+			lastSent = currentSent
 
 			if p.consoleUI != nil {
-				p.consoleUI.SetBPS(int64(smoothDown), int64(smoothUp))
+				p.consoleUI.SetBPS(int64(smoothSent), int64(smoothRecv))
 			}
 
 		case <-p.done:
