@@ -49,10 +49,6 @@ type Console struct {
 	comment   string
 	startTime time.Time
 
-	// BPS tracking.
-	bytesRead    int64
-	bytesWritten int64
-
 	// Running state — set to false by Ctrl-E + c.
 	running bool
 
@@ -119,7 +115,7 @@ func (c *Console) Close() {
 	defer c.mu.Unlock()
 	c.running = false
 	// Reset scroll region to full screen.
-	fmt.Fprint(os.Stdout, "\033[0;r")
+	fmt.Fprint(os.Stdout, "\033[r")
 	// Clear the two footer lines.
 	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K", c.rows-1)
 	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K", c.rows)
@@ -156,15 +152,6 @@ func (c *Console) SetComment(s string) {
 	c.comment = s
 	c.mu.Unlock()
 	c.drawStatusBar()
-}
-
-// RecordBytes adds to the byte counters for BPS calculation.
-// Called from the I/O loop in Peer.
-func (c *Console) RecordBytes(read, written int64) {
-	c.mu.Lock()
-	c.bytesRead += read
-	c.bytesWritten += written
-	c.mu.Unlock()
 }
 
 // HandleWinch updates the terminal dimensions and adjusts the scroll region.

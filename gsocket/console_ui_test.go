@@ -28,18 +28,18 @@ func TestFormatSize(t *testing.T) {
 }
 
 func TestConsoleCommandDispatch(t *testing.T) {
-	// Verify that known commands are dispatched through the Console without panicking.
 	cases := []struct {
 		name  string
 		input string // input to feed through ConsoleReader in console mode
+		want  string // expected command string (empty means nothing dispatched)
 	}{
-		{"ping", "ping\r"},
-		{"pwd", "pwd\r"},
-		{"log", "log\r"},
-		{"ids", "ids\r"},
-		{"clear", "clear\r"},
-		{"unknown_cmd", "unknown_cmd\r"},
-		{"empty", "\r"},
+		{"ping", "ping\r", "ping"},
+		{"pwd", "pwd\r", "pwd"},
+		{"log", "log\r", "log"},
+		{"ids", "ids\r", "ids"},
+		{"clear", "clear\r", "clear"},
+		{"unknown_cmd", "unknown_cmd\r", "unknown_cmd"},
+		{"empty", "\r", ""},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -57,10 +57,8 @@ func TestConsoleCommandDispatch(t *testing.T) {
 			buf := make([]byte, 1024)
 			_, _ = c.Read(buf)
 
-			// For non-empty input, verify something was dispatched.
-			// For empty input ("\r"), nothing should be dispatched.
-			if tt.name == "empty" && gotCmd != "" {
-				t.Errorf("empty input dispatched command %q", gotCmd)
+			if gotCmd != tt.want {
+				t.Errorf("dispatch %q: got %q, want %q", tt.name, gotCmd, tt.want)
 			}
 		})
 	}
@@ -78,15 +76,6 @@ func TestNewConsole(t *testing.T) {
 	if c.Running() {
 		t.Error("Console should not be running after Close")
 	}
-}
-
-func TestConsoleRecordBytes(t *testing.T) {
-	c := NewConsole(bytes.NewReader(nil))
-	defer c.Close()
-	// Verify RecordBytes does not panic when called.
-	c.RecordBytes(100, 200)
-	c.RecordBytes(0, 0)
-	c.RecordBytes(1<<30, 1<<20)
 }
 
 func TestConsoleSetMethods(t *testing.T) {

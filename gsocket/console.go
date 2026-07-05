@@ -1,6 +1,9 @@
 package gsocket
 
-import "io"
+import (
+	"io"
+	"sync"
+)
 
 // ConsoleReader wraps an io.Reader (normally os.Stdin) and filters
 // Ctrl-E (0x05) escape sequences according to the gsocket console
@@ -25,7 +28,8 @@ import "io"
 // encrypted channel, while also providing console functionality.
 type ConsoleReader struct {
 	src     io.Reader
-	pending bool // true when last char was 0x05 and we're in escape mode
+	mu      sync.Mutex // guards cmdBuf
+	pending bool       // true when last char was 0x05 and we're in escape mode
 
 	// Console mode state (set by Console UI via SetConsoleMode).
 	consoleMode bool
@@ -53,7 +57,19 @@ func (cr *ConsoleReader) SetConsoleMode(on bool) {
 
 // CmdBuf returns a copy of the current command buffer contents.
 func (cr *ConsoleReader) CmdBuf() []byte {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
 	return append([]byte{}, cr.cmdBuf...)
+}
+
+// Lock locks the ConsoleReader mutex for atomic access to cmdBuf.
+func (cr *ConsoleReader) Lock() {
+	cr.mu.Lock()
+}
+
+// Unlock unlocks the ConsoleReader mutex.
+func (cr *ConsoleReader) Unlock() {
+	cr.mu.Unlock()
 }
 
 // Read reads data from the underlying reader and filters Ctrl-E escape
@@ -112,7 +128,9 @@ func (cr *ConsoleReader) Read(p []byte) (n int, err error) {
 func (cr *ConsoleReader) handleConsoleEscape(c byte) {
 	switch c {
 	case GS_CONSOLE_ESC, 'E', 'e':
+		cr.mu.Lock()
 		cr.cmdBuf = append(cr.cmdBuf, GS_CONSOLE_ESC)
+		cr.mu.Unlock()
 		if cr.onCmdChanged != nil {
 			cr.onCmdChanged()
 		}
@@ -124,7 +142,9 @@ func (cr *ConsoleReader) handleConsoleEscape(c byte) {
 		cr.readArrowSequence()
 	default:
 		// Non-screen behavior: forward to cmdBuf.
+		cr.mu.Lock()
 		cr.cmdBuf = append(cr.cmdBuf, c)
+		cr.mu.Unlock()
 		if cr.onCmdChanged != nil {
 			cr.onCmdChanged()
 		}
@@ -153,24 +173,34 @@ func (cr *ConsoleReader) forwardEscape(c byte, p []byte) int {
 func (cr *ConsoleReader) handleConsoleChar(c byte) {
 	switch c {
 	case 0x0D: // Enter
-		if cr.onCommand != nil && len(cr.cmdBuf) > 0 {
-			cr.onCommand(string(cr.cmdBuf))
+		cr.mu.Lock()
+		var cmd string
+		if len(cr.cmdBuf) > 0 {
+			cmd = string(cr.cmdBuf)
 		}
 		cr.cmdBuf = cr.cmdBuf[:0]
+		cr.mu.Unlock()
+		if cmd != "" && cr.onCommand != nil {
+			cr.onCommand(cmd)
+		}
 		if cr.onCmdChanged != nil {
 			cr.onCmdChanged()
 		}
 	case 0x7F: // Backspace
+		cr.mu.Lock()
 		if len(cr.cmdBuf) > 0 {
 			cr.cmdBuf = cr.cmdBuf[:len(cr.cmdBuf)-1]
-			if cr.onCmdChanged != nil {
-				cr.onCmdChanged()
-			}
+		}
+		cr.mu.Unlock()
+		if cr.onCmdChanged != nil {
+			cr.onCmdChanged()
 		}
 	default:
 		// Printable ASCII only.
 		if c >= 0x20 && c < 0x7F {
+			cr.mu.Lock()
 			cr.cmdBuf = append(cr.cmdBuf, c)
+			cr.mu.Unlock()
 			if cr.onCmdChanged != nil {
 				cr.onCmdChanged()
 			}

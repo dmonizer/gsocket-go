@@ -65,9 +65,6 @@ type Peer struct {
 	hasPTY      bool
 	ptyMasterFd uintptr
 
-	// Console state (client side).
-	consoleReader *ConsoleReader
-
 	// Console UI state (client side, -C flag).
 	consoleUI *Console
 
