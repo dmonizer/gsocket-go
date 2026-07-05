@@ -84,8 +84,14 @@ func main() {
 		genSecret   = flag.Bool("g", false, "Generate a random secret and exit")
 		daemon      = flag.Bool("D", false, "Daemon mode — fork into background with auto-restart")
 		watchdog    = flag.Bool("W", false, "Watchdog mode — auto-restart on crash")
+		procTitle   = flag.String("T", "", "Process title (Linux: 15 chars max, Windows: console title)")
 	)
 	flag.Parse()
+
+	// Set process title if requested (Linux: prctl PR_SET_NAME, Windows: SetConsoleTitle).
+	if *procTitle != "" {
+		gsocket.SetProcessTitle(*procTitle)
+	}
 
 	// -g: Generate a cryptographically random secret, print it, and exit.
 	// Matches C's `-g` flag.
