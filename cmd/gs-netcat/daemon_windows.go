@@ -176,9 +176,10 @@ func reexecAsDaemon() {
 
 	fmt.Fprintf(os.Stderr, "%s: daemon: calling startService('%s')...\n", appName, serviceName)
 	if err := startService(m, serviceName); err != nil {
-		os.Exit(0)
-			fmt.Fprintf(os.Stderr, "%s: Check that %s is accessible by LocalSystem.\n", appName, servicePath)
-			fmt.Fprintf(os.Stderr, "%s:   sc delete %s\n", appName, serviceName)
+		fmt.Fprintf(os.Stderr, "%s: daemon: startService failed: %v\n", appName, err)
+		fmt.Fprintf(os.Stderr, "%s: Check that %s is accessible by LocalSystem.\n", appName, servicePath)
+		fmt.Fprintf(os.Stderr, "%s:   sc delete %s\n", appName, serviceName)
+		log.Fatalf("daemon: service installed but could not be started")
 	}
 	os.Exit(0)
 }
@@ -240,14 +241,15 @@ func copyFile(src, dst string) error {
 // it blocks until the service stops and returns nil. If not running under
 // SCM, it returns an error immediately — the caller falls through to
 // console mode.
+//
+// No logging: we try silently on every startup since the SCM restart
+// does not include -D. If not under SCM, svc.Run returns an error
+// immediately and we continue as normal.
 func tryRunAsService() error {
-	log.Printf("service: tryRunAsService: calling svc.Run('%s')...", serviceName)
 	h := &serviceHandler{workerDone: make(chan struct{})}
 	err := svc.Run(serviceName, h)
 	if err != nil {
-		log.Printf("service: svc.Run() returned error: %s (not a service)", winErr(err))
 		return err
 	}
-	log.Printf("service: svc.Run() returned nil, workerErr=%v", h.workerErr)
 	return h.workerErr
 }

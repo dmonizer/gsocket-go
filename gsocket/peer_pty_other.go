@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package gsocket
 
@@ -74,17 +74,25 @@ func (p *Peer) runWithPTY(shell string) error {
 				if derr != nil {
 					return
 				}
-				// On Windows (no PTY), 0x03 is just a byte — it doesn't
-				// generate Ctrl-C. Kill the shell to match expected behavior.
+				// Without a PTY there is no line discipline to handle
+				// Ctrl-C or translate \r→\n. Do both here.
+				translated := make([]byte, 0, len(plaintext))
 				for _, b := range plaintext {
 					if b == 0x03 {
 						p.logger.Printf("Ctrl-C received — killing shell")
 						cmd.Process.Kill()
 						return
 					}
+					if b == '\r' {
+						// \r → \n: the raw-mode client sends \r for
+						// Enter, but pipe-attached shells expect \n.
+						translated = append(translated, '\n')
+					} else {
+						translated = append(translated, b)
+					}
 				}
-				if len(plaintext) > 0 {
-					if _, werr := stdinPipe.Write(plaintext); werr != nil {
+				if len(translated) > 0 {
+					if _, werr := stdinPipe.Write(translated); werr != nil {
 						return
 					}
 				}

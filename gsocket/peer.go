@@ -18,6 +18,18 @@ import (
 	"golang.org/x/term"
 )
 
+// lockedWriter wraps an io.Writer with a mutex for serialised writes.
+type lockedWriter struct {
+	w  io.Writer
+	mu *sync.Mutex
+}
+
+func (lw *lockedWriter) Write(p []byte) (int, error) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.w.Write(p)
+}
+
 // PeerRole indicates whether this peer initiated the connection.
 type PeerRole int
 
@@ -52,6 +64,7 @@ type Peer struct {
 	isUDP         bool   // use UDP transport with length-prefix framing
 	socksProxyAddr string // SOCKS5 proxy address for GSRN connections
 	sockWait      bool   // wait for server to become available (-w)
+	quiet         bool   // suppress non-essential output (-q)
 	logger        *log.Logger
 
 	// Internal state.
@@ -64,8 +77,18 @@ type Peer struct {
 	hasPTY      bool
 	ptyMasterFd uintptr
 
-	// Console state (client side).
+	// Console UI state (client side, -C flag).
+	consoleUI *Console
+
+	// ConPTY (Windows): use Pseudo Console instead of pipes (-conpty).
+	useConPTY bool
+
+	// consoleReader is set when runClientInteractive creates a
+	// ConsoleReader without the Console UI. The NOPTY handler enables
+	// line editing on it.
 	consoleReader *ConsoleReader
+
+	stdoutMu *sync.Mutex // serialises stdout writes with line editor
 
 	// App-level ping state.
 	pingTicker   *time.Ticker
@@ -153,6 +176,23 @@ func WithLogger(l *log.Logger) PeerOption {
 	return func(p *Peer) { p.logger = l }
 }
 
+// WithQuiet suppresses non-essential output messages (matching C's -q flag).
+func WithQuiet() PeerOption {
+	return func(p *Peer) { p.quiet = true }
+}
+
+// WithConsole enables the Ctrl-E split-screen console UI (status bar, commands).
+// Only meaningful on the client side in interactive mode.
+func WithConsole() PeerOption {
+	return func(p *Peer) { p.consoleUI = NewConsole(os.Stdin) }
+}
+
+// WithConPTY enables Windows ConPTY (Pseudo Console) for interactive shells.
+// Server-only; ignored on non-Windows platforms.
+func WithConPTY() PeerOption {
+	return func(p *Peer) { p.useConPTY = true }
+}
+
 // NewPeer creates a new Peer with the given shared secret and role.
 func NewPeer(secret string, role PeerRole, opts ...PeerOption) *Peer {
 	p := &Peer{
@@ -180,7 +220,7 @@ func (p *Peer) AcceptOnListener(ctx context.Context) error {
 		client.SetToken(p.gsrnToken)
 	}
 
-	p.logger.Printf("Registering on %s", client.primaryHost())
+	p.logger.Printf("Registering on %s", client.PrimaryHost())
 
 	gsrn, err := client.ConnectListener()
 	if err != nil {
@@ -188,6 +228,12 @@ func (p *Peer) AcceptOnListener(ctx context.Context) error {
 	}
 
 	p.logger.Printf("Waiting for client...")
+
+	// Close GSRN when context is cancelled to unblock WaitForClient.
+	go func() {
+		<-ctx.Done()
+		gsrn.Close()
+	}()
 
 	if _, err := client.WaitForClient(gsrn); err != nil {
 		gsrn.Close()
@@ -211,9 +257,9 @@ func (p *Peer) DialAndConnect(ctx context.Context) error {
 		p.gsrnClient = client
 
 		if p.sockWait {
-			p.logger.Printf("Waiting for server on %s...", client.primaryHost())
+			p.logger.Printf("Waiting for server on %s...", client.PrimaryHost())
 		} else {
-			p.logger.Printf("Connecting to %s", client.primaryHost())
+			p.logger.Printf("Connecting to %s", client.PrimaryHost())
 		}
 
 		gsrn, err := client.ConnectClient()
@@ -251,7 +297,7 @@ func (p *Peer) gsrnClientOpts(ctx context.Context) []GSRNClientOption {
 	}
 	// Wire verbose logging: GSRN connection steps are logged via the
 	// peer's logger. Format: "gsrn: <message>".
-	opts = append(opts, WithVerboseLog(func(format string, args ...interface{}) {
+	opts = append(opts, WithVerboseLog(func(format string, args ...any) {
 		p.logger.Printf("gsrn: "+format, args...)
 	}))
 	return opts
@@ -260,7 +306,11 @@ func (p *Peer) gsrnClientOpts(ctx context.Context) []GSRNClientOption {
 // finishHandshake completes the secure channel setup after GSRN connects peers.
 func (p *Peer) finishHandshake(gsrn *GSRNConn, isServer bool) error {
 	start := time.Now()
-	p.logger.Printf("starting secure handshake (role=%s)...", map[bool]string{true: "server", false: "client"}[isServer])
+	roleStr := "client"
+	if isServer {
+		roleStr = "server"
+	}
+	p.logger.Printf("starting secure handshake (role=%s)...", roleStr)
 
 	channel, err := Handshake(gsrn.RawConn(), p.secret, isServer)
 	if err != nil {
@@ -314,7 +364,9 @@ func (p *Peer) RunShell() error {
 		return p.runSOCKSServer()
 	}
 
-	fmt.Fprintf(os.Stderr, "GS tunnel established. Press Ctrl-C to exit.\r\n")
+	if !p.quiet {
+		fmt.Fprintf(os.Stderr, "GS tunnel established. Press Ctrl-C to exit.\r\n")
+	}
 
 	if p.execCmd != "" {
 		return p.runExecCmd()
@@ -507,7 +559,7 @@ func (p *Peer) runInteractive() error {
 // runClientInteractive sets up the local terminal for interactive use with a
 // remote shell: raw mode (no local echo, char-by-char input), Ctrl-C
 // forwarding (sends 0x03 byte instead of killing gs-netcat), Ctrl-E console
-// escape handling, and SIGWINCH forwarding for terminal resize.
+// escape handling and (optionally) split-screen UI, and SIGWINCH forwarding.
 func (p *Peer) runClientInteractive() error {
 	// Start app-level keepalive pings (every 30 s, matching C).
 	p.startAppPing()
@@ -524,21 +576,55 @@ func (p *Peer) runClientInteractive() error {
 	}
 	defer term.Restore(fd, oldState)
 
-	// Register SIGWINCH handler — when the terminal is resized, capture
-	// the new dimensions and send a WSIZE message to the server.
+	// Register SIGWINCH handler. If console UI is active, also notify
+	// the Console so it can adjust the scroll region.
 	p.registerWinchHandler()
 
-	// Wrap stdin with ConsoleReader to handle Ctrl-E escape sequences.
-	// Ctrl-E + E/Ctrl-E sends literal 0x05 through the channel (for emacs
-	// and other applications that use Ctrl-E).
-	cr := NewConsoleReader(os.Stdin)
+	// Shared stdout mutex — serialises line-editor ANSI output
+	// with channel→stdout writes regardless of -C mode.
+	stdoutMu := &sync.Mutex{}
+	p.stdoutMu = stdoutMu
+
+	// Set up display output (Console or plain stdout) and stdin reader.
+	var display io.Writer
+	var stdinReader io.Reader
+	if p.consoleUI != nil {
+		p.consoleUI.stdoutMu = stdoutMu
+		p.consoleUI.OnCommand = p.handleConsoleCommand
+		p.consoleUI.Init()
+		defer p.consoleUI.Close()
+		go p.startBPSTicker()
+		display = p.consoleUI
+		stdinReader = p.consoleUI
+	} else {
+		display = &lockedWriter{w: os.Stdout, mu: stdoutMu}
+		cr := NewConsoleReader(os.Stdin)
+		p.consoleReader = cr
+		stdinReader = cr
+	}
+
+	// Drain the first message from the channel before starting
+	// stdin. The server sends the NOPTY status (or shell prompt)
+	// immediately after the handshake; processing it here ensures
+	// line editing is enabled before any keystrokes arrive.
+	buf := make([]byte, 8192)
+	n, err := p.channel.Read(buf)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		plaintext, derr := p.app.Decode(buf[:n])
+		if derr == nil && len(plaintext) > 0 {
+			display.Write(plaintext)
+		}
+	}
 
 	// Stdin → Channel.
 	go func() {
 		defer p.Close()
 		buf := make([]byte, 8192)
 		for {
-			n, err := cr.Read(buf)
+			n, err := stdinReader.Read(buf)
 			if n > 0 {
 				if _, werr := p.channel.Write(buf[:n]); werr != nil {
 					return
@@ -554,16 +640,16 @@ func (p *Peer) runClientInteractive() error {
 	}()
 
 	// Channel → Stdout (blocks until remote disconnects or channel breaks).
-	buf := make([]byte, 8192)
+	buf = make([]byte, 8192)
 	for {
-		n, err := p.channel.Read(buf)
+		n, err = p.channel.Read(buf)
 		if n > 0 {
 			plaintext, derr := p.app.Decode(buf[:n])
 			if derr != nil {
 				return derr
 			}
 			if len(plaintext) > 0 {
-				os.Stdout.Write(plaintext)
+				display.Write(plaintext)
 			}
 			p.mu.Lock()
 			p.bytesRead += int64(n)
@@ -574,6 +660,44 @@ func (p *Peer) runClientInteractive() error {
 			// stdin→channel goroutine stuck on terminal read.
 			os.Stdin.Close()
 			return nil
+		}
+	}
+}
+
+// handleConsoleCommand dispatches console commands typed after Ctrl-E + down arrow.
+func (p *Peer) handleConsoleCommand(cmd string) {
+	switch cmd {
+	case "ping":
+		// Send an immediate PING and set comment until PONG arrives.
+		ping := AppPing{}
+		p.mu.Lock()
+		p.pingSentTime = time.Now().UnixNano()
+		p.mu.Unlock()
+		var buf bytes.Buffer
+		if err := binary.Write(&buf, binary.BigEndian, ping); err != nil {
+			return
+		}
+		if err := p.app.SendMessage(msgPing, buf.Bytes()); err != nil {
+			p.consoleUI.SetComment("ping failed")
+		} else {
+			p.consoleUI.SetComment("ping sent...")
+		}
+	case "pwd":
+		// Request remote working directory.
+		if err := p.app.SendMessage(msgPWDReq, nil); err != nil {
+			p.consoleUI.SetComment("pwd failed")
+		} else {
+			p.consoleUI.SetComment("pwd...")
+		}
+	case "log":
+		p.consoleUI.SetComment("log: not implemented")
+	case "ids":
+		p.consoleUI.SetComment("IDS: not implemented")
+	case "clear":
+		p.consoleUI.SetComment("")
+	default:
+		if cmd != "" {
+			p.consoleUI.SetComment("unknown: " + cmd)
 		}
 	}
 }
@@ -900,6 +1024,10 @@ func (p *Peer) wireAppCallbacks() {
 		if sentAt > 0 {
 			rtt := time.Since(time.Unix(0, sentAt))
 			p.logger.Printf("PONG received (RTT %v)", rtt.Round(time.Microsecond))
+			if p.consoleUI != nil {
+				p.consoleUI.SetPingRTT(rtt)
+				p.consoleUI.SetComment("") // clear "ping sent..." comment
+			}
 		}
 		return nil
 	})
@@ -934,10 +1062,37 @@ func (p *Peer) wireAppCallbacks() {
 		}
 		switch data[0] {
 		case StatusTypeNoPTY:
-			p.logger.Printf("Server has no PTY — switching to pipe mode")
+			p.logger.Printf("Server has no PTY — enabling line editing")
 			p.mu.Lock()
 			p.hasPTY = false
+				if p.consoleReader != nil {
+					ed := NewLineEditor(os.Stdout, p.stdoutMu)
+					p.consoleReader.SetLineMode(true, ed)
+				}
+				if p.consoleUI != nil {
+					p.consoleUI.EnableLineEditing(p.stdoutMu)
+				}
 			p.mu.Unlock()
+		}
+		return nil
+	})
+
+	// PWDReq â working directory request from client â server replies.
+	p.app.OnMessage(msgPWDReq, func(msgType uint8, data []byte) error {
+		if p.role != RoleServer {
+			return nil
+		}
+		wd, err := os.Getwd()
+		if err != nil {
+			wd = err.Error()
+		}
+		return p.app.SendChannel(chnPWD-chnOffset, []byte(wd))
+	})
+
+	// chnPWD â working directory reply from server â client.
+	p.app.OnChannel(chnPWD-chnOffset, func(msgType uint8, data []byte) error {
+		if p.consoleUI != nil {
+			p.consoleUI.SetComment("pwd: " + string(data))
 		}
 		return nil
 	})
@@ -966,4 +1121,53 @@ func (p *Peer) startAppPing() {
 			}
 		}
 	}()
+}
+
+// startBPSTicker computes bytes-per-second using an exponential moving
+// average (matching C's console BPS calculation) and pushes updates
+// to the Console UI every second.
+func (p *Peer) startBPSTicker() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	var lastRecv, lastSent int64
+	var smoothRecv, smoothSent float64
+	lastTime := time.Now()
+
+	for {
+		select {
+		case <-ticker.C:
+			if p.consoleUI != nil && !p.consoleUI.Running() {
+				return // console closed via Ctrl-E + c
+			}
+			now := time.Now()
+			elapsed := now.Sub(lastTime).Seconds()
+			if elapsed <= 0 {
+				elapsed = 1
+			}
+			lastTime = now
+
+			p.mu.Lock()
+			currentRecv := p.bytesRead
+			currentSent := p.bytesWritten
+			p.mu.Unlock()
+
+			instantRecv := float64(currentRecv-lastRecv) / elapsed
+			instantSent := float64(currentSent-lastSent) / elapsed
+
+			// Exponential moving average: weight of 0.125 to new sample.
+			smoothRecv = smoothRecv*0.875 + instantRecv*0.125
+			smoothSent = smoothSent*0.875 + instantSent*0.125
+
+			lastRecv = currentRecv
+			lastSent = currentSent
+
+			if p.consoleUI != nil {
+				p.consoleUI.SetBPS(int64(smoothSent), int64(smoothRecv))
+			}
+
+		case <-p.done:
+			return
+		}
+	}
 }

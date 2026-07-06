@@ -145,6 +145,9 @@ func SOCKSServe(rw io.ReadWriter) (net.Conn, error) {
 		return nil, fmt.Errorf("SOCKS5 read greeting: %w", err)
 	}
 	if greeting[0] != socks5Version {
+		// Drain remaining greeting bytes (methods list) to avoid
+		// deadlocking synchronous transports like net.Pipe.
+		drainReader(rw, int(greeting[1]))
 		return nil, fmt.Errorf("SOCKS5: unsupported version %d", greeting[0])
 	}
 	nmethods := int(greeting[1])
@@ -170,7 +173,12 @@ func SOCKSServe(rw io.ReadWriter) (net.Conn, error) {
 		return nil, fmt.Errorf("SOCKS5: bad version in connect request: %d", hdr[0])
 	}
 	if hdr[1] != socks5CmdConnect {
-		// Unsupported command.
+		// Drain remaining connect request bytes before replying.
+		// Without this, synchronous transports (e.g. net.Pipe in tests)
+		// deadlock: the pipe still has unread address+port bytes, so
+		// writing the reply blocks waiting for a reader that's also
+		// blocked trying to finish writing the request.
+		drainSocks5Addr(rw, hdr[3])
 		sendSocks5Reply(rw, socks5RepCmdNotSupported, nil, 0)
 		return nil, fmt.Errorf("SOCKS5: unsupported command %d", hdr[1])
 	}
@@ -243,6 +251,35 @@ func SOCKSServe(rw io.ReadWriter) (net.Conn, error) {
 	}
 
 	return target, nil
+}
+
+// drainSocks5Addr reads and discards the variable-length address and port
+// bytes that follow a SOCKS5 request header. addrType is the ATYP field
+// from byte 3 of the request header.
+func drainSocks5Addr(rw io.Reader, addrType byte) {
+	switch addrType {
+	case socks5AddrTypeIPv4:
+		io.ReadFull(rw, make([]byte, 4+2)) // 4-byte IPv4 + 2-byte port
+	case socks5AddrTypeFQDN:
+		lenBuf := make([]byte, 1)
+		if _, err := io.ReadFull(rw, lenBuf); err != nil {
+			return
+		}
+		io.ReadFull(rw, make([]byte, int(lenBuf[0])+2)) // domain + port
+	case socks5AddrTypeIPv6:
+		io.ReadFull(rw, make([]byte, 16+2)) // 16-byte IPv6 + 2-byte port
+	}
+}
+
+// drainReader reads and discards up to n bytes from r. It stops early on
+// any error (including EOF) and does not return an error — best-effort only.
+func drainReader(r io.Reader, n int) {
+	for i := 0; i < n; i++ {
+		var b [1]byte
+		if _, err := r.Read(b[:]); err != nil {
+			return
+		}
+	}
 }
 
 // sendSocks5Reply sends a SOCKS5 reply packet through w.

@@ -69,8 +69,6 @@ const (
 	gsAcceptSize  = 32
 	gsStatusSize  = 32
 
-	// Max message across all packet types.
-	gsMaxMsgLen = 128
 )
 
 // Protocol errors.
@@ -82,8 +80,6 @@ var (
 	ErrGSRNProtoError    = errors.New("gsocket: protocol error")
 	ErrGSRNNetError      = errors.New("gsocket: network error")
 	ErrGSRNNeedUpdate    = errors.New("gsocket: client needs update")
-	ErrGSRNAuthFailedStr = "address already in use"
-	ErrGSRNConnRefusedStr = "connection refused (no server listening)"
 )
 
 // raw packet structs — must match C layout exactly.
@@ -147,15 +143,8 @@ type gsStatusPacket struct {
 	Msg     [28]uint8
 }
 
-// readFullPacket reads exactly size bytes from r into a buffer.
-func readFullPacket(r io.Reader, size int) ([]byte, error) {
-	buf := make([]byte, size)
-	_, err := io.ReadFull(r, buf)
-	return buf, err
-}
-
 // sendPacket marshals a struct to binary and writes it to w.
-func sendPacket(w io.Writer, pkt interface{}) error {
+func sendPacket(w io.Writer, pkt any) error {
 	var buf bytes.Buffer
 	if err := binary.Write(&buf, binary.BigEndian, pkt); err != nil {
 		return fmt.Errorf("marshal packet: %w", err)
@@ -180,6 +169,7 @@ type GSRNConn struct {
 	lastPing   time.Time
 	pingTicker *time.Ticker
 	done       chan struct{}
+	stopOnce   sync.Once // guards StopKeepalive against double-close
 }
 
 // NewGSRNConn wraps an existing net.Conn with the GSRN protocol handler.
@@ -254,12 +244,14 @@ func (g *GSRNConn) StartKeepalive() {
 	}()
 }
 
-// StopKeepalive stops the periodic ping loop.
+// StopKeepalive stops the periodic ping loop. Safe to call multiple times.
 func (g *GSRNConn) StopKeepalive() {
-	if g.pingTicker != nil {
-		g.pingTicker.Stop()
-	}
-	close(g.done)
+	g.stopOnce.Do(func() {
+		if g.pingTicker != nil {
+			g.pingTicker.Stop()
+		}
+		close(g.done)
+	})
 }
 
 // ReadPacket reads and dispatches the next GSRN protocol packet.
@@ -383,15 +375,15 @@ type GSRNClient struct {
 	token      [TokenSize]byte
 	flags      uint8
 	socksAddr  string // optional SOCKS5 proxy address
-	verboseLog func(format string, args ...interface{})
+	verboseLog func(format string, args ...any)
 	ctx        context.Context // cancellation context for dial
 
 	// Connection state
 	gsrnConn *GSRNConn
 }
 
-// primaryHost returns the first (preferred) GSRN hostname.
-func (c *GSRNClient) primaryHost() string {
+// PrimaryHost returns the first (preferred) GSRN hostname.
+func (c *GSRNClient) PrimaryHost() string {
 	if len(c.gsrnHosts) > 0 {
 		return c.gsrnHosts[0]
 	}
@@ -402,7 +394,7 @@ func (c *GSRNClient) primaryHost() string {
 type GSRNClientOption func(*GSRNClient)
 
 // WithVerboseLog enables verbose logging for GSRN connection steps.
-func WithVerboseLog(logf func(format string, args ...interface{})) GSRNClientOption {
+func WithVerboseLog(logf func(format string, args ...any)) GSRNClientOption {
 	return func(c *GSRNClient) { c.verboseLog = logf }
 }
 
@@ -632,7 +624,7 @@ func (c *GSRNClient) WaitForClient(gsrn *GSRNConn) (*GSRNConn, error) {
 // relay node is unreachable.
 func (c *GSRNClient) dialGSRN() (net.Conn, error) {
 	if c.socksAddr != "" {
-		addr := net.JoinHostPort(c.primaryHost(), fmt.Sprintf("%d", c.gsrnPort))
+		addr := net.JoinHostPort(c.PrimaryHost(), fmt.Sprintf("%d", c.gsrnPort))
 		if c.verboseLog != nil {
 			c.verboseLog("dialing GSRN via SOCKS5 proxy %s → %s", c.socksAddr, addr)
 		}
@@ -682,7 +674,58 @@ func (c *GSRNClient) dialGSRN() (net.Conn, error) {
 		}
 	}
 	// All 26 × 2 = 52 attempts failed.
-	return nil, fmt.Errorf("dial %s: %w", c.primaryHost(), lastErr)
+	return nil, fmt.Errorf("dial %s: %w", c.PrimaryHost(), lastErr)
+}
+
+// ProbeServer checks whether a server is listening for the given secret.
+// It connects to GSRN with flagProtoServerCheck, which tells the relay
+// to report server presence without establishing a full connection.
+// Returns nil if a server is listening, or an error describing the result.
+func (c *GSRNClient) ProbeServer() error {
+	conn, err := c.dialGSRN()
+	if err != nil {
+		return fmt.Errorf("connect to GSRN: %w", err)
+	}
+	defer conn.Close()
+
+	if c.verboseLog != nil {
+		c.verboseLog("sending CONNECT (server check) addr=%s", c.addr)
+	}
+
+	flags := c.flags | flagProtoServerCheck
+	gsrn := NewGSRNConn(conn, c.addr, c.token, flags, true)
+	if err := gsrn.SendConnect(); err != nil {
+		return fmt.Errorf("send connect: %w", err)
+	}
+
+	if c.verboseLog != nil {
+		c.verboseLog("waiting for GSRN response (server check)...")
+	}
+
+	pktType, payload, err := gsrn.ReadPacket()
+	if err != nil {
+		return fmt.Errorf("read GSRN response: %w", err)
+	}
+
+	if c.verboseLog != nil {
+		c.verboseLog("received GSRN packet type=0x%02x (%d bytes)", pktType, len(payload))
+	}
+
+	switch pktType {
+	case pktTypeStatus:
+		if len(payload) >= 4 && payload[2] == statusCodeServerOK {
+			if c.verboseLog != nil {
+				c.verboseLog("GSRN: server IS listening")
+			}
+			return nil
+		}
+		if err := ParseStatus(payload); err != nil {
+			return err
+		}
+		return fmt.Errorf("unexpected status response")
+	default:
+		return fmt.Errorf("unexpected GSRN packet type: 0x%02x (expected STATUS)", pktType)
+	}
 }
 
 // generateRandomToken creates a random 16-byte token using crypto/rand.
