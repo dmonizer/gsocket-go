@@ -18,8 +18,9 @@ Quick start:
 	peer.RunShell()
 
 The package replaces the original C library's TLS-SRP (RFC 5054) encryption
-with a modern ECDH-X25519 + HKDF + AES-256-GCM handshake, providing the
-same security properties (mutual authentication, forward secrecy) without
-any C dependencies.
+with CPace (RFC 9383) — a balanced Password-Authenticated Key Exchange over
+X25519 — followed by AES-256-GCM. This provides mutual authentication,
+forward secrecy, and offline dictionary attack resistance without any C
+dependencies.
 */
 package gsocket

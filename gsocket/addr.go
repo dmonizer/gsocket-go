@@ -113,6 +113,16 @@ func DeriveKeyMaterial(secret string) (srpPassword string, addr Addr) {
 	return
 }
 
+// DeriveBaseKey derives the raw 32-byte base key from the shared secret.
+// It equals SHA256("/kd/srp/1" + secret) — the raw bytes before hex
+// encoding. Used by the CPace handshake for the password-dependent scalar.
+func DeriveBaseKey(secret string) []byte {
+	h := sha256.New()
+	h.Write([]byte(domainKD1))
+	h.Write([]byte(secret))
+	return h.Sum(nil)
+}
+
 // DeriveToken derives a connection token from an optional auth string and
 // the GS address. If auth is empty, the caller should use a random token.
 //

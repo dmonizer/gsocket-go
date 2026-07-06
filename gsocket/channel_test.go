@@ -156,26 +156,21 @@ func TestHandshakeWrongSecret(t *testing.T) {
 	}
 }
 
-func TestHandshakeBothServers(t *testing.T) {
+func TestHandshakeRoleDeadlock(t *testing.T) {
 	a, b := connectPipes()
 	secret := "test-secret"
 
-	var serverErr, clientErr error
-	var wg sync.WaitGroup
-	wg.Add(2)
+	errCh := make(chan error, 2)
+	go func() { _, err := Handshake(a, secret, false); errCh <- err }()
+	go func() { _, err := Handshake(b, secret, false); errCh <- err }()
 
-	go func() {
-		defer wg.Done()
-		_, serverErr = Handshake(a, secret, true)
-	}()
-	go func() {
-		defer wg.Done()
-		_, clientErr = Handshake(b, secret, true)
-	}()
-	wg.Wait()
-
-	if serverErr == nil && clientErr == nil {
-		t.Error("expected failure when both peers act as server")
+	// Both are "client" — both try to write Ya first. One sends,
+	// the other reads Ya instead of Yb. Either the confirmation
+	// check fails or one side deadlocks (which is fine for CPace).
+	err1 := <-errCh
+	err2 := <-errCh
+	if err1 == nil && err2 == nil {
+		t.Error("expected deadlock or auth failure with two clients")
 	}
 }
 
@@ -266,23 +261,53 @@ func TestSecureChannelClosed(t *testing.T) {
 	clientCh.Close()
 }
 
-func TestComputeAuthTag(t *testing.T) {
-	baseKey := []byte("test-base-key-32-bytes-long!!")
-	pubKey := bytes.Repeat([]byte{0x42}, x25519KeySize)
+func TestClampX25519Scalar(t *testing.T) {
+	input := bytes.Repeat([]byte{0xFF}, 32)
+	clamped := clampX25519Scalar(input)
 
-	tag1 := computeAuthTag(baseKey, pubKey, authDomainServer)
-	tag2 := computeAuthTag(baseKey, pubKey, authDomainClient)
-
-	if len(tag1) != authTagSize {
-		t.Errorf("auth tag size = %d, want %d", len(tag1), authTagSize)
+	if len(clamped) != 32 {
+		t.Errorf("length = %d, want 32", len(clamped))
 	}
-	if bytes.Equal(tag1, tag2) {
-		t.Error("server and client auth tags should differ")
+	if clamped[0]&0x07 != 0 {
+		t.Error("low 3 bits not cleared")
 	}
+	if clamped[31]&0x40 == 0 {
+		t.Error("bit 254 not set")
+	}
+	if clamped[31]&0x80 != 0 {
+		t.Error("bit 255 not cleared")
+	}
+	if input[0] != 0xFF {
+		t.Error("original slice mutated")
+	}
+}
 
-	tag1Again := computeAuthTag(baseKey, pubKey, authDomainServer)
-	if !bytes.Equal(tag1, tag1Again) {
-		t.Error("auth tag not deterministic")
+func TestDeriveCPaceScalar(t *testing.T) {
+	baseKey := bytes.Repeat([]byte{0x42}, 32)
+	d1 := deriveCPaceScalar(baseKey)
+	d2 := deriveCPaceScalar(baseKey)
+
+	if len(d1) != 32 {
+		t.Errorf("length = %d, want 32", len(d1))
+	}
+	if !bytes.Equal(d1, d2) {
+		t.Error("scalar derivation not deterministic")
+	}
+	if d1[0]&0x07 != 0 {
+		t.Error("low 3 bits not cleared")
+	}
+}
+
+func TestCPaceConfirmReflection(t *testing.T) {
+	kConfirm := bytes.Repeat([]byte{0x13}, 32)
+	Ya := bytes.Repeat([]byte{0xAA}, 32)
+	Yb := bytes.Repeat([]byte{0xBB}, 32)
+
+	clientTag := computeCPaceConfirm(kConfirm, confirmTagClient, Ya, Yb)
+	serverTag := computeCPaceConfirm(kConfirm, confirmTagServer, Ya, Yb)
+
+	if bytes.Equal(clientTag, serverTag) {
+		t.Error("client and server confirmation tags should differ")
 	}
 }
 
@@ -298,22 +323,22 @@ func TestMakeNonce(t *testing.T) {
 	}
 }
 
-func TestDeriveSessionKey(t *testing.T) {
-	baseKey := bytes.Repeat([]byte{0x01}, 32)
-	ecdhSecret := bytes.Repeat([]byte{0x02}, 32)
+func TestDeriveCPaceKey(t *testing.T) {
+	K := bytes.Repeat([]byte{0xAA}, 32)
+	salt := []byte("test-salt")
 
-	key1 := deriveSessionKey(baseKey, ecdhSecret)
-	key2 := deriveSessionKey(baseKey, ecdhSecret)
+	k1 := deriveCPaceKey(K, salt)
+	k2 := deriveCPaceKey(K, salt)
 
-	if len(key1) != aes256KeySize {
-		t.Errorf("session key size = %d, want %d", len(key1), aes256KeySize)
+	if len(k1) != 32 {
+		t.Errorf("length = %d, want 32", len(k1))
 	}
-	if !bytes.Equal(key1, key2) {
-		t.Error("session key derivation not deterministic")
+	if !bytes.Equal(k1, k2) {
+		t.Error("key derivation not deterministic")
 	}
 
-	key3 := deriveSessionKey(baseKey, bytes.Repeat([]byte{0x03}, 32))
-	if bytes.Equal(key1, key3) {
-		t.Error("different ECDH secrets produced same session key")
+	k3 := deriveCPaceKey(bytes.Repeat([]byte{0xBB}, 32), salt)
+	if bytes.Equal(k1, k3) {
+		t.Error("different K should produce different keys")
 	}
 }
