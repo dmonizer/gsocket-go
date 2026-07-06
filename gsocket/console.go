@@ -96,7 +96,7 @@ func (cr *ConsoleReader) Unlock() {
 // to fill p — that would block indefinitely on stdin in raw mode.
 func (cr *ConsoleReader) Read(p []byte) (n int, err error) {
 	// When line editing is active, process locally.
-	if cr.lineMode && !cr.consoleMode {
+	if cr.lineMode {
 		return cr.readWithLineEdit(p)
 	}
 
@@ -158,12 +158,52 @@ func (cr *ConsoleReader) readWithLineEdit(p []byte) (n int, err error) {
 	for i := 0; i < len(src); i++ {
 		c := src[i]
 
+		// In console mode, accumulate in cmdBuf instead of
+		// line buffer. Enter dispatches the command.
+		if cr.consoleMode {
+			if cr.pending {
+				cr.pending = false
+				// Arrow keys after Ctrl-E: switch focus.
+				if c == 0x1B {
+					cr.consumeLineArrow(src, &i)
+					continue
+				}
+				cr.handleConsoleEscape(c)
+				continue
+			}
+			if c == GS_CONSOLE_ESC {
+				cr.pending = true
+				continue
+			}
+			// Swallow bare arrow keys in console mode —
+			// they do not belong in the command buffer.
+			if c == 0x1B && i+2 < len(src) && src[i+1] == '[' {
+				i += 2 // skip ESC and '['
+				continue
+			}
+			cr.handleConsoleChar(c)
+			continue
+		}
+
 		// Ctrl-E escape handling.
 		if cr.pending {
 			cr.pending = false
+			if c == 'c' && cr.onCloseConsole != nil {
+				cr.onCloseConsole()
+				continue
+			}
 			if c == GS_CONSOLE_ESC || c == 'E' || c == 'e' {
 				ed.Insert(GS_CONSOLE_ESC)
 				ed.Redraw()
+				continue
+			}
+			if c == 0x1B {
+				// Arrow key after Ctrl-E: consume ESC [ dir.
+				cr.consumeLineArrow(src, &i)
+				continue
+			}
+			if c == '[' {
+				cr.readArrowSequence()
 				continue
 			}
 			ed.Insert(c)
@@ -233,6 +273,34 @@ func (cr *ConsoleReader) readWithLineEdit(p []byte) (n int, err error) {
 	}
 
 	return dst, err
+}
+
+// consumeLineArrow reads the rest of an arrow key sequence
+// ([ direction) from the current chunk after Ctrl-E + ESC.
+// Advances the chunk index i past the consumed bytes.
+// Up/down dispatch to console focus callbacks; left/right
+// delegate to line-editor cursor movement.
+func (cr *ConsoleReader) consumeLineArrow(src []byte, i *int) {
+	if *i+1 >= len(src) || src[*i+1] != '[' {
+		return
+	}
+	*i++ // consume '['
+	if *i+1 >= len(src) {
+		return
+	}
+	*i++ // consume direction
+	switch src[*i] {
+	case 'A': // Up
+		if cr.onFocusUp != nil {
+			cr.onFocusUp()
+		}
+	case 'B': // Down
+		if cr.onFocusDown != nil {
+			cr.onFocusDown()
+		}
+	default:
+		cr.handleLineArrowKey(src[*i])
+	}
 }
 
 func (cr *ConsoleReader) handleLineArrowKey(dir byte) {

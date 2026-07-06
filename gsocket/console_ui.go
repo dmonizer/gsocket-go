@@ -77,7 +77,7 @@ func NewConsole(stdin io.Reader) *Console {
 	// Wire ConsoleReader callbacks to Console methods.
 	c.reader.onFocusDown = c.enterCommandMode
 	c.reader.onFocusUp = c.exitCommandMode
-	c.reader.onCloseConsole = c.shutdown
+	c.reader.onCloseConsole = c.toggleCommandMode
 	c.reader.onCommand = c.dispatchCommand
 	c.reader.onCmdChanged = c.redrawCommandLine
 
@@ -134,14 +134,15 @@ func (c *Console) Write(data []byte) (int, error) {
 	return os.Stdout.Write(data)
 }
 
-// Close resets the terminal to normal operation.
+// Close resets the terminal to normal operation. Idempotent.
 func (c *Console) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.running {
+		return
+	}
 	c.running = false
-	// Reset scroll region to full screen.
 	fmt.Fprint(os.Stdout, "\033[r")
-	// Clear the two footer lines.
 	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K", c.rows-1)
 	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K", c.rows)
 }
@@ -198,12 +199,33 @@ func (c *Console) HandleWinch(rows, cols int) {
 
 // --- private methods ---
 
+// toggleCommandMode toggles between shell focus and console
+// command-line focus (Ctrl-E + c). Does nothing if shut down.
+func (c *Console) toggleCommandMode() {
+	c.mu.Lock()
+	if !c.running {
+		c.mu.Unlock()
+		return
+	}
+	isShell := c.focus == focusShell
+	c.mu.Unlock()
+	if isShell {
+		c.enterCommandMode()
+	} else {
+		c.exitCommandMode()
+	}
+}
+
 // enterCommandMode switches focus to the console command line.
 func (c *Console) enterCommandMode() {
 	c.mu.Lock()
 	c.focus = focusConsole
 	c.mu.Unlock()
 	c.reader.SetConsoleMode(true)
+	if c.stdoutMu != nil {
+		c.stdoutMu.Lock()
+		defer c.stdoutMu.Unlock()
+	}
 	c.redrawCommandLine()
 }
 
@@ -213,22 +235,19 @@ func (c *Console) exitCommandMode() {
 	c.focus = focusShell
 	c.mu.Unlock()
 	c.reader.SetConsoleMode(false)
-	// Clear the command line.
-	if c.rows > 0 {
-		fmt.Fprintf(os.Stdout, "\033[s\033[%d;1H\033[K\033[u", c.rows)
+	if c.stdoutMu != nil {
+		c.stdoutMu.Lock()
+		defer c.stdoutMu.Unlock()
 	}
-}
-
-// shutdown closes the console (Ctrl-E + c).
-func (c *Console) shutdown() {
-	c.mu.Lock()
-	c.running = false
-	c.focus = focusShell
-	c.mu.Unlock()
-	c.reader.SetConsoleMode(false)
-	// Clear command line.
+	// Clear command line, then move cursor to the bottom of
+	// the shell area (just above the status bar).
 	if c.rows > 0 {
-		fmt.Fprintf(os.Stdout, "\033[s\033[%d;1H\033[K\033[u", c.rows)
+		fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K", c.rows)
+	}
+	if c.rows > 2 {
+		// Position at end of shell output — new output scrolls
+		// naturally from here.
+		fmt.Fprintf(os.Stdout, "\033[%d;1H", c.rows-2)
 	}
 }
 
@@ -259,7 +278,10 @@ func (c *Console) measureTerminal() {
 func (c *Console) drawStatusBar() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.reader.lineMode {
+	// Defer status bar updates while line-editing in shell mode
+	// (avoids \033[s/\033[u interference). In console mode the
+	// command feedback must appear immediately.
+	if c.reader.lineMode && c.focus == focusShell {
 		c.statusDirty = true
 		return
 	}
@@ -323,7 +345,7 @@ func (c *Console) redrawCommandLine() {
 }
 
 // renderCommandLine draws the command prompt at the bottom row.
-// Must be called with c.mu held.
+// Must be called with c.mu held. Leaves cursor at the prompt.
 func (c *Console) renderCommandLine() {
 	if c.rows < 1 {
 		return
@@ -332,7 +354,8 @@ func (c *Console) renderCommandLine() {
 	if len(prompt) > c.cols {
 		prompt = prompt[:c.cols]
 	}
-	fmt.Fprintf(os.Stdout, "\033[s\033[%d;1H\033[K%s\033[u", c.rows, prompt)
+	// Position at bottom row, clear, write prompt, leave cursor there.
+	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K%s", c.rows, prompt)
 }
 
 // formatSize formats a byte count for human display.
