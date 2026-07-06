@@ -169,6 +169,7 @@ type GSRNConn struct {
 	lastPing   time.Time
 	pingTicker *time.Ticker
 	done       chan struct{}
+	stopOnce   sync.Once // guards StopKeepalive against double-close
 }
 
 // NewGSRNConn wraps an existing net.Conn with the GSRN protocol handler.
@@ -243,12 +244,14 @@ func (g *GSRNConn) StartKeepalive() {
 	}()
 }
 
-// StopKeepalive stops the periodic ping loop.
+// StopKeepalive stops the periodic ping loop. Safe to call multiple times.
 func (g *GSRNConn) StopKeepalive() {
-	if g.pingTicker != nil {
-		g.pingTicker.Stop()
-	}
-	close(g.done)
+	g.stopOnce.Do(func() {
+		if g.pingTicker != nil {
+			g.pingTicker.Stop()
+		}
+		close(g.done)
+	})
 }
 
 // ReadPacket reads and dispatches the next GSRN protocol packet.

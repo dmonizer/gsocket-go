@@ -27,3 +27,6 @@ Thumbs.db
 
 # Dependencies (vendored)
 vendor/
+
+# Local design/planning docs (not for commit)
+localdocs/

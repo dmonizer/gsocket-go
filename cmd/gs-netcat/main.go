@@ -90,6 +90,7 @@ func main() {
 		quiet       = flag.Bool("q", false, "Quiet mode — suppress all output")
 		logFile     = flag.String("L", "", "Log to file instead of stderr")
 		consoleUI   = flag.Bool("C", false, "Enable console status bar and commands (Ctrl-E)")
+		conPTY      = flag.Bool("conpty", false, "Use Windows ConPTY for interactive shell (server only, Win10+)")
 	)
 	flag.Parse()
 
@@ -144,6 +145,7 @@ func main() {
 	watchdogFlag := *watchdog
 	quietFlag := *quiet
 	consoleUIFlag := *consoleUI
+	conPTYFlag := *conPTY
 
 	// realMain is the actual work: resolve secret, connect, run shell.
 	// On Windows, the service handler calls this in a goroutine.
@@ -212,6 +214,9 @@ func main() {
 		}
 		if consoleUIFlag {
 			opts = append(opts, gsocket.WithConsole())
+		}
+		if conPTYFlag {
+			opts = append(opts, gsocket.WithConPTY())
 		}
 		if listenFlag {
 			runListener(sec, opts)

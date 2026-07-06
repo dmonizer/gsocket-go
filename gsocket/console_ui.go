@@ -41,6 +41,13 @@ type Console struct {
 	// Focus state.
 	focus consoleFocus
 
+	// Serialises stdout writes with the line editor (set by EnableLineEditing).
+	stdoutMu *sync.Mutex
+
+	// statusDirty is set when the status bar needs redrawing but
+	// line editing is active (deferred until the user presses Enter).
+	statusDirty bool
+
 	// Status bar values.
 	mu        sync.Mutex
 	pingRTT   time.Duration
@@ -83,6 +90,8 @@ func NewConsole(stdin io.Reader) *Console {
 // Init sets up the terminal for split-screen operation.
 // Must be called after term.MakeRaw (raw mode must be active).
 func (c *Console) Init() {
+	// Clear screen and home cursor so the session starts clean.
+	fmt.Fprint(os.Stdout, "\033[2J\033[H")
 	// Set scroll region: rows 0 to rows-2 (0-indexed), leaving
 	// rows rows-1 and rows for the footer. ANSI scroll regions
 	// are 1-indexed, so: \033[1;rows-2r.
@@ -90,6 +99,18 @@ func (c *Console) Init() {
 		fmt.Fprintf(os.Stdout, "\033[1;%dr", c.rows-2)
 	}
 	c.drawStatusBar()
+}
+
+// EnableLineEditing enables local line editing on the underlying
+// ConsoleReader. Called when the server reports no PTY.
+// stdoutMu serialises display writes with channel→stdout output.
+func (c *Console) EnableLineEditing(stdoutMu *sync.Mutex) {
+	c.stdoutMu = stdoutMu
+	ed := NewLineEditor(os.Stdout, stdoutMu)
+	c.reader.SetLineMode(true, ed)
+	// Defer status bar updates while line editing to avoid
+	// \033[s/\033[u interference with the line editor.
+	c.reader.onLineEntered = c.flushDeferredStatusBar
 }
 
 // Read reads from stdin, applying console escape filtering and command
@@ -105,6 +126,10 @@ func (c *Console) Read(p []byte) (int, error) {
 func (c *Console) Write(data []byte) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
+	}
+	if c.stdoutMu != nil {
+		c.stdoutMu.Lock()
+		defer c.stdoutMu.Unlock()
 	}
 	return os.Stdout.Write(data)
 }
@@ -229,10 +254,26 @@ func (c *Console) measureTerminal() {
 }
 
 // drawStatusBar renders the status bar at row rows-1.
+// If line editing is active, the redraw is deferred until the
+// user presses Enter, avoiding \033[s/\033[u interference.
 func (c *Console) drawStatusBar() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.reader.lineMode {
+		c.statusDirty = true
+		return
+	}
 	c.renderStatusBar()
+}
+
+// flushDeferredStatusBar draws the status bar if it was deferred.
+func (c *Console) flushDeferredStatusBar() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.statusDirty {
+		c.statusDirty = false
+		c.renderStatusBar()
+	}
 }
 
 // renderStatusBar builds and writes the status line and command line.

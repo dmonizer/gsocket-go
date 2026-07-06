@@ -10,6 +10,11 @@ import (
 // protocol. This matches the C implementation's CONSOLE_check_esc()
 // state machine.
 //
+// When lineMode is enabled (via SetLineMode), the reader provides
+// local line editing via LineEditor: characters are buffered, arrow
+// keys move the cursor, backspace deletes, and only Enter sends the
+// completed line. This is used when the server has no PTY.
+//
 // Escape sequences (shell mode):
 //
 //	Ctrl-E + E       → emit literal 0x05 byte
@@ -23,9 +28,6 @@ import (
 // In console mode, printable characters accumulate in cmdBuf instead of
 // being forwarded. Enter dispatches the command via onCommand and clears
 // the buffer. Backspace (0x7F) deletes the last character.
-//
-// This allows applications like emacs to receive Ctrl-E through the
-// encrypted channel, while also providing console functionality.
 type ConsoleReader struct {
 	src     io.Reader
 	mu      sync.Mutex // guards cmdBuf
@@ -41,6 +43,11 @@ type ConsoleReader struct {
 	onCloseConsole func()
 	onCommand      func(string) // Enter pressed in console mode
 	onCmdChanged   func()       // cmdBuf contents changed (for redraw)
+
+	// Local line editing (enabled when server has no PTY).
+	lineMode      bool
+	editor        *LineEditor
+	onLineEntered func() // called after Enter flushes line (Console defers status bar)
 }
 
 // NewConsoleReader creates a new ConsoleReader wrapping the given source.
@@ -49,10 +56,17 @@ func NewConsoleReader(src io.Reader) *ConsoleReader {
 }
 
 // SetConsoleMode toggles command accumulation mode.
-// In console mode, printable characters go to the command buffer
-// instead of being forwarded. Call with false to return to shell mode.
 func (cr *ConsoleReader) SetConsoleMode(on bool) {
 	cr.consoleMode = on
+}
+
+// SetLineMode enables local line editing. Characters are buffered
+// locally; arrow keys, backspace, and delete work on the buffer.
+// Only Enter sends a completed line to output. stdoutMu serialises
+// display writes with the channel→stdout path.
+func (cr *ConsoleReader) SetLineMode(on bool, editor *LineEditor) {
+	cr.lineMode = on
+	cr.editor = editor
 }
 
 // CmdBuf returns a copy of the current command buffer contents.
@@ -77,30 +91,39 @@ func (cr *ConsoleReader) Unlock() {
 // forward to the channel. In console mode, bytes accumulate in the
 // command buffer and the returned count is typically 0.
 //
-// It reads a single byte at a time from the source to implement the
-// state machine. Performance is not a concern because interactive
-// terminal input is low-volume and already in raw mode.
+// It reads a single chunk from the source (blocking only until data is
+// available) and processes it through the state machine. We do NOT loop
+// to fill p — that would block indefinitely on stdin in raw mode.
 func (cr *ConsoleReader) Read(p []byte) (n int, err error) {
-	buf := make([]byte, 1)
-	for n < len(p) {
-		_, err := cr.src.Read(buf)
-		if err != nil {
-			return n, err
-		}
-		c := buf[0]
+	// When line editing is active, process locally.
+	if cr.lineMode && !cr.consoleMode {
+		return cr.readWithLineEdit(p)
+	}
+
+	// Read whatever is available from the source in one shot.
+	nr, err := cr.src.Read(p)
+	if nr == 0 {
+		return 0, err
+	}
+
+	// Process in-place: src spans the bytes we just read, dst tracks
+	// the write position. Since we only remove bytes (never add), the
+	// write position never overtakes the read position.
+	src := p[:nr]
+	dst := 0
+	for i := 0; i < len(src); i++ {
+		c := src[i]
 
 		if cr.pending {
 			cr.pending = false
 			if cr.consoleMode {
 				cr.handleConsoleEscape(c)
 			} else {
-				// In shell mode, Ctrl-E + c also closes, but only if
-				// the console is active (onCloseConsole is set).
 				if c == 'c' && cr.onCloseConsole != nil {
 					cr.onCloseConsole()
 					continue
 				}
-				n += cr.forwardEscape(c, p[n:])
+				dst += cr.forwardEscape(c, p[dst:])
 			}
 			continue
 		}
@@ -115,16 +138,125 @@ func (cr *ConsoleReader) Read(p []byte) (n int, err error) {
 			continue
 		}
 
-		p[n] = c
-		n++
+		p[dst] = c
+		dst++
 	}
-	return n, nil
+	return dst, err
+}
+
+// readWithLineEdit processes input with local line editing.
+func (cr *ConsoleReader) readWithLineEdit(p []byte) (n int, err error) {
+	nr, err := cr.src.Read(p)
+	if nr == 0 {
+		return 0, err
+	}
+
+	src := p[:nr]
+	dst := 0
+	ed := cr.editor
+
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+
+		// Ctrl-E escape handling.
+		if cr.pending {
+			cr.pending = false
+			if c == GS_CONSOLE_ESC || c == 'E' || c == 'e' {
+				ed.Insert(GS_CONSOLE_ESC)
+				ed.Redraw()
+				continue
+			}
+			ed.Insert(c)
+			ed.Redraw()
+			continue
+		}
+
+		if c == GS_CONSOLE_ESC {
+			cr.pending = true
+			continue
+		}
+
+		// Ctrl-C / Ctrl-D — forward immediately.
+		if c == 0x03 || c == 0x04 {
+			p[dst] = c
+			dst++
+			continue
+		}
+
+		// Enter — flush the line, send \n.
+		if c == 0x0D {
+			ed.Newline()
+			line := ed.Flush()
+			dst += copy(p[dst:], line)
+			p[dst] = '\n'
+			dst++
+			if cr.onLineEntered != nil {
+				cr.onLineEntered()
+			}
+			continue
+		}
+
+		// Backspace (DEL or BS).
+		if c == 0x7F || c == 0x08 {
+			ed.Backspace()
+			ed.Redraw()
+			continue
+		}
+
+		// ESC — arrow key sequence.
+		if c == 0x1B && i+1 < len(src) {
+			if src[i+1] == '[' {
+				i++ // consume '['
+				if i+1 < len(src) {
+					cr.handleLineArrowKey(src[i+1])
+					i++
+					continue
+				}
+				continue
+			}
+			continue
+		}
+
+		// Tab — insert spaces.
+		if c == '\t' {
+			ed.Insert(' ')
+			ed.Insert(' ')
+			ed.Redraw()
+			continue
+		}
+
+		// Printable characters.
+		if c >= 0x20 && c < 0x7F {
+			ed.Insert(c)
+			ed.Redraw()
+		}
+	}
+
+	return dst, err
+}
+
+func (cr *ConsoleReader) handleLineArrowKey(dir byte) {
+	ed := cr.editor
+	switch dir {
+	case 'D': // Left
+		ed.MoveLeft()
+	case 'C': // Right
+		ed.MoveRight()
+	case 'H': // Home
+		ed.Home()
+	case 'F': // End
+		ed.End()
+	case '3': // Delete (~ follows)
+		ed.Delete()
+		ed.Redraw()
+		return
+	default:
+		return
+	}
+	ed.RepositionCursor()
 }
 
 // handleConsoleEscape processes Ctrl-E sequences when in console mode.
-// Ctrl-E + E/e/Ctrl-E → literal Ctrl-E in cmdBuf.
-// Ctrl-E + ↑ → onFocusUp.
-// Ctrl-E + c → onCloseConsole.
 func (cr *ConsoleReader) handleConsoleEscape(c byte) {
 	switch c {
 	case GS_CONSOLE_ESC, 'E', 'e':
@@ -141,7 +273,6 @@ func (cr *ConsoleReader) handleConsoleEscape(c byte) {
 	case '[':
 		cr.readArrowSequence()
 	default:
-		// Non-screen behavior: forward to cmdBuf.
 		cr.mu.Lock()
 		cr.cmdBuf = append(cr.cmdBuf, c)
 		cr.mu.Unlock()
@@ -156,14 +287,12 @@ func (cr *ConsoleReader) handleConsoleEscape(c byte) {
 func (cr *ConsoleReader) forwardEscape(c byte, p []byte) int {
 	switch c {
 	case 'E', 'e', GS_CONSOLE_ESC:
-		// Ctrl-E + E/e/Ctrl-E → literal Ctrl-E byte.
 		p[0] = GS_CONSOLE_ESC
 		return 1
 	case '[':
 		cr.readArrowSequence()
 		return 0
 	default:
-		// Non-screen behavior (matches C): emit the character directly.
 		p[0] = c
 		return 1
 	}
@@ -196,7 +325,6 @@ func (cr *ConsoleReader) handleConsoleChar(c byte) {
 			cr.onCmdChanged()
 		}
 	default:
-		// Printable ASCII only.
 		if c >= 0x20 && c < 0x7F {
 			cr.mu.Lock()
 			cr.cmdBuf = append(cr.cmdBuf, c)
@@ -208,26 +336,21 @@ func (cr *ConsoleReader) handleConsoleChar(c byte) {
 	}
 }
 
-// readArrowSequence consumes the rest of an ANSI arrow key sequence
-// (e.g. "[A" for Up, "[B" for Down, "[C" for Right, "[D" for Left).
-// The '[' has already been consumed. Dispatches onFocusUp/Down for
-// A/B; discards C/D.
+// readArrowSequence consumes the rest of an ANSI arrow key sequence.
 func (cr *ConsoleReader) readArrowSequence() {
 	buf := make([]byte, 1)
 	_, _ = cr.src.Read(buf)
 	switch buf[0] {
-	case 'A': // Up arrow
+	case 'A':
 		if cr.onFocusUp != nil {
 			cr.onFocusUp()
 		}
-	case 'B': // Down arrow
+	case 'B':
 		if cr.onFocusDown != nil {
 			cr.onFocusDown()
 		}
 	}
-	// C (right), D (left) — silently discard.
 }
 
-// GS_CONSOLE_ESC is the Ctrl-E escape byte (0x05), matching C's
-// GS_CONSOLE_ESC definition in console.h.
+// GS_CONSOLE_ESC is the Ctrl-E escape byte (0x05).
 const GS_CONSOLE_ESC = 0x05

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
@@ -44,6 +45,7 @@ type SecureChannel struct {
 	aesgcm  cipher.AEAD
 	sendCtr uint64
 	recvCtr uint64
+	writeMu sync.Mutex
 	closed  bool
 }
 
@@ -93,6 +95,9 @@ func Handshake(conn io.ReadWriteCloser, secret string, isServer bool) (*SecureCh
 // Frame format: [2-byte ciphertext length][ciphertext+16-byte-GCM-tag]
 // Nonces are derived deterministically from a counter on each side.
 func (sc *SecureChannel) Write(data []byte) (int, error) {
+	sc.writeMu.Lock()
+	defer sc.writeMu.Unlock()
+
 	if sc.closed {
 		return 0, ErrChannelClosed
 	}

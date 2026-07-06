@@ -20,9 +20,12 @@ func shellExec() string {
 }
 
 // shellInteractive returns the shell for -i interactive mode on Windows.
-// cmd.exe works better with pipes than powershell for interactive use,
-// so prefer it when no explicit preference is set.
+// cmd.exe works better with pipes than powershell for interactive use:
+// it echoes input characters so the remote user can see what they type.
 func shellInteractive() string {
+	if p, err := exec.LookPath("cmd.exe"); err == nil {
+		return p
+	}
 	return shellExec()
 }
 
@@ -36,15 +39,15 @@ func shellExecArgs(command string) []string {
 }
 
 // shellInteractiveArgs returns arguments for an interactive shell session
-// using pipes (no real console). cmd.exe /Q keeps it quiet.
+// using pipes (no real console). No /Q so cmd.exe echoes user input.
 func shellInteractiveArgs() []string {
 	shell := shellInteractive()
 	if len(shell) >= 14 && shell[len(shell)-14:] == "powershell.exe" {
 		// -NoLogo: suppress banner, -NoExit: stay alive, -Command -: read from stdin
 		return []string{"-NoLogo", "-NoExit", "-Command", "-"}
 	}
-	// cmd.exe: /Q turns echo off, stdin/stdout work via pipes.
-	return []string{"/Q"}
+	// cmd.exe: no /Q — we want echo so the remote user sees their input.
+	return nil
 }
 
 // setShellSysProcAttr prevents the child shell from writing directly to the

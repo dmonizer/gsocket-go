@@ -18,6 +18,18 @@ import (
 	"golang.org/x/term"
 )
 
+// lockedWriter wraps an io.Writer with a mutex for serialised writes.
+type lockedWriter struct {
+	w  io.Writer
+	mu *sync.Mutex
+}
+
+func (lw *lockedWriter) Write(p []byte) (int, error) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.w.Write(p)
+}
+
 // PeerRole indicates whether this peer initiated the connection.
 type PeerRole int
 
@@ -67,6 +79,16 @@ type Peer struct {
 
 	// Console UI state (client side, -C flag).
 	consoleUI *Console
+
+	// ConPTY (Windows): use Pseudo Console instead of pipes (-conpty).
+	useConPTY bool
+
+	// consoleReader is set when runClientInteractive creates a
+	// ConsoleReader without the Console UI. The NOPTY handler enables
+	// line editing on it.
+	consoleReader *ConsoleReader
+
+	stdoutMu *sync.Mutex // serialises stdout writes with line editor
 
 	// App-level ping state.
 	pingTicker   *time.Ticker
@@ -165,6 +187,12 @@ func WithConsole() PeerOption {
 	return func(p *Peer) { p.consoleUI = NewConsole(os.Stdin) }
 }
 
+// WithConPTY enables Windows ConPTY (Pseudo Console) for interactive shells.
+// Server-only; ignored on non-Windows platforms.
+func WithConPTY() PeerOption {
+	return func(p *Peer) { p.useConPTY = true }
+}
+
 // NewPeer creates a new Peer with the given shared secret and role.
 func NewPeer(secret string, role PeerRole, opts ...PeerOption) *Peer {
 	p := &Peer{
@@ -200,6 +228,12 @@ func (p *Peer) AcceptOnListener(ctx context.Context) error {
 	}
 
 	p.logger.Printf("Waiting for client...")
+
+	// Close GSRN when context is cancelled to unblock WaitForClient.
+	go func() {
+		<-ctx.Done()
+		gsrn.Close()
+	}()
 
 	if _, err := client.WaitForClient(gsrn); err != nil {
 		gsrn.Close()
@@ -546,20 +580,43 @@ func (p *Peer) runClientInteractive() error {
 	// the Console so it can adjust the scroll region.
 	p.registerWinchHandler()
 
-	// Wire Console command dispatch if console UI is active.
+	// Shared stdout mutex — serialises line-editor ANSI output
+	// with channel→stdout writes regardless of -C mode.
+	stdoutMu := &sync.Mutex{}
+	p.stdoutMu = stdoutMu
+
+	// Set up display output (Console or plain stdout) and stdin reader.
+	var display io.Writer
+	var stdinReader io.Reader
 	if p.consoleUI != nil {
+		p.consoleUI.stdoutMu = stdoutMu
 		p.consoleUI.OnCommand = p.handleConsoleCommand
 		p.consoleUI.Init()
 		defer p.consoleUI.Close()
 		go p.startBPSTicker()
-	}
-
-	// Choose the stdin reader: Console (with UI) or bare ConsoleReader.
-	var stdinReader io.Reader
-	if p.consoleUI != nil {
+		display = p.consoleUI
 		stdinReader = p.consoleUI
 	} else {
-		stdinReader = NewConsoleReader(os.Stdin)
+		display = &lockedWriter{w: os.Stdout, mu: stdoutMu}
+		cr := NewConsoleReader(os.Stdin)
+		p.consoleReader = cr
+		stdinReader = cr
+	}
+
+	// Drain the first message from the channel before starting
+	// stdin. The server sends the NOPTY status (or shell prompt)
+	// immediately after the handshake; processing it here ensures
+	// line editing is enabled before any keystrokes arrive.
+	buf := make([]byte, 8192)
+	n, err := p.channel.Read(buf)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		plaintext, derr := p.app.Decode(buf[:n])
+		if derr == nil && len(plaintext) > 0 {
+			display.Write(plaintext)
+		}
 	}
 
 	// Stdin → Channel.
@@ -583,20 +640,16 @@ func (p *Peer) runClientInteractive() error {
 	}()
 
 	// Channel → Stdout (blocks until remote disconnects or channel breaks).
-	buf := make([]byte, 8192)
+	buf = make([]byte, 8192)
 	for {
-		n, err := p.channel.Read(buf)
+		n, err = p.channel.Read(buf)
 		if n > 0 {
 			plaintext, derr := p.app.Decode(buf[:n])
 			if derr != nil {
 				return derr
 			}
 			if len(plaintext) > 0 {
-				if p.consoleUI != nil {
-					p.consoleUI.Write(plaintext)
-				} else {
-					os.Stdout.Write(plaintext)
-				}
+				display.Write(plaintext)
 			}
 			p.mu.Lock()
 			p.bytesRead += int64(n)
@@ -1009,9 +1062,16 @@ func (p *Peer) wireAppCallbacks() {
 		}
 		switch data[0] {
 		case StatusTypeNoPTY:
-			p.logger.Printf("Server has no PTY — switching to pipe mode")
+			p.logger.Printf("Server has no PTY — enabling line editing")
 			p.mu.Lock()
 			p.hasPTY = false
+				if p.consoleReader != nil {
+					ed := NewLineEditor(os.Stdout, p.stdoutMu)
+					p.consoleReader.SetLineMode(true, ed)
+				}
+				if p.consoleUI != nil {
+					p.consoleUI.EnableLineEditing(p.stdoutMu)
+				}
 			p.mu.Unlock()
 		}
 		return nil

@@ -1,17 +1,23 @@
 # gsocket-go vs C gsocket — Feature Completeness Map
 
-> Last updated: 2026-07-05
+> Last updated: 2026-07-05 — audited against C **beta** channel
+> (branch `beta` at `2cdac14`, https://github.com/hackerschoice/gsocket)
+>
+> **Note:** The C `beta` branch is the stable/production channel. The `master`
+> branch has ~755 additional commits of in-development work. This audit compares
+> Go against the beta channel only.
 
 ## Summary
 
-The Go implementation covers the **core happy path** of the original C codebase
-(~68% of features). It handles the fundamental use case — two peers connecting
+The Go implementation covers the **core happy path** of the C beta codebase
+(~73% of features). It handles the fundamental use case — two peers connecting
 interactively over GSRN — plus SOCKS5 proxying, multi-peer concurrency, UDP
-transport, daemon mode (Unix + Windows service), watchdog auto-restart,
-process title (`-T`), SIGWINCH terminal resize, NOPTY fallback, app-level
-PING/PONG keepalive, LOG/STATUS in-band messaging, and Ctrl-E console escape
-handling. Still missing: file transfer engine, full console UI/commands, IDS,
-full statistics formatting, and several minor CLI flags.
+transport, daemon mode (Unix + Windows service), watchdog auto-restart, process
+title (`-T`), SIGWINCH terminal resize, NOPTY fallback, app-level PING/PONG
+keepalive, LOG/STATUS in-band messaging, Ctrl-E console escape handling, a
+basic console UI with status bar and command line (`-C`), quiet mode (`-q`),
+and log-to-file (`-L`). Still missing: file transfer engine, full console
+commands, IDS, full statistics formatting, and several minor CLI flags.
 
 ---
 
@@ -31,7 +37,7 @@ full statistics formatting, and several minor CLI flags.
 | Multi-sox backlog (parallel listening sockets to GSRN) | ✅ | ❌ | C opens multiple TCP sockets for fast re-accept |
 | Auto-reconnect on network failure | ✅ | ❌ | |
 | `GS_FL_PROTO_WAIT` — wait for server to appear | ✅ | ⚠️ | Constant defined; not plumbed to dial |
-| `GS_FL_PROTO_CLIENT_OR_SERVER` — fallback role swap | ✅ | ⚠️ | Constant defined; unused |
+| `GS_FL_PROTO_CLIENT_OR_SERVER` — fallback role swap | ✅ | ⚠️ | C `-A` flag; Go constant defined but unused |
 | `GS_FL_PROTO_FAST_CONNECT` — skip wait, data follows | ✅ | ✅ | |
 | `GS_FL_PROTO_SERVER_CHECK` — probe if server is listening | ✅ | ⚠️ | Constant defined; unused |
 | Slow-connect warning after 4 s | ✅ | ❌ | |
@@ -39,6 +45,8 @@ full statistics formatting, and several minor CLI flags.
 | `GSOCKET_IP` env var | ✅ | ❌ | |
 | `GSOCKET_PORT` env var | ✅ | ❌ | |
 | `GSOCKET_HOST` env var | ✅ | ❌ | |
+| `GSOCKET_ARGS` env var (additional CLI args from env) | ✅ | ❌ | |
+| Single-shot mode — accept one connection then stop | ✅ | ❌ | `GS_FL_SINGLE_SHOT` / `is_multi_peer == 0` |
 
 ---
 
@@ -50,10 +58,16 @@ full statistics formatting, and several minor CLI flags.
 | Mutual authentication | ✅ (SRP) | ✅ (HMAC) | |
 | Forward secrecy | ✅ | ✅ | Ephemeral keys per session |
 | C ↔ Go interoperability | — | ❌ | By design — different crypto on same relay |
+| Disable encryption (C `-C` flag) | ✅ | ❌ | C beta `-C` = `GS_OPT_NO_ENCRYPTION`; Go has no equivalent |
 
 **Result:** Go and C clients coexist on the same GSRN but cannot talk directly
 to each other. From a security standpoint the Go protocol is actually stronger
 (modern AEAD cipher, no legacy SRP dependency).
+
+**Important:** In the C beta branch, `-C` means **"Disable encryption"** — not
+"Console status bar" as sometimes assumed. The console in C is auto-enabled
+with interactive mode (`-i`) via `Ctrl-E+c`. Go uses `-C` to enable its
+console UI (different semantics, same flag letter).
 
 ---
 
@@ -71,20 +85,30 @@ to each other. From a security standpoint the Go protocol is actually stronger
 | `-t` | ✅ | ✅ | Check if server is listening (probe only) |
 | `-S` | ✅ | ✅ | Act as SOCKS server (needs `-l`) |
 | `-D` | ✅ | ✅ | Daemon mode (fork & background, includes watchdog) |
-| `-W` | ✅ | ✅ | Watchdog mode (auto-restart on crash) |
+| `-W` | ⚠️ | ✅ | C: deprecated (old-style watchdog, `-D` implies it); Go: watchdog mode |
 | `-u` | ✅ | ✅ | UDP transport (`-p` required) |
-| `-r` | ✅ | ❌ | Receive-only mode |
-| `-T` | ✅ | ✅ | TOR (legacy flag in C); process title in Go (prctl + argv overwrite on Linux) |
-| `--tor` | ✅ | ✅ | TOR via SOCKS5 (`127.0.0.1:9050`) |
+| `-r` | ✅ | ❌ | Receive-only mode — terminate when no more data |
+| `-T` | ✅ | ✅ | C: TOR (legacy); Go: process title (prctl + argv overwrite on Linux) |
+| `--tor` | ✅ | ✅ | TOR via SOCKS5 (`127.0.0.1:9050`); C via `-T`, Go via `--tor` |
 | `-m` | ✅ | ❌ | Display man page |
 | `-w` | ✅ | ✅ | Wait for server to become available |
 | `-q` | ✅ | ✅ | Quiet mode — suppress all output |
 | `-v` | ✅ | ✅ | Verbose output |
 | `-g` | ✅ | ✅ | Generate a random secret and exit |
 | `-L <file>` | ✅ | ✅ | Log to file |
-| `-C` | ✅ | ❌ | Console status bar |
+| `-C` | ✅ | ✅ | C: **disable encryption** (`GS_OPT_NO_ENCRYPTION`); Go: enable console UI + commands |
+| `-P <path>` | ✅ | ❌ | Write PID file |
+| `-B <min>` | ✅ | ❌ | Check GSRN every `<min>` minutes, sleep otherwise (needs `-l`) |
+| `-I` | ✅ | ❌ | Ignore EOF on stdin (keep connection open) |
+| `-A` | ✅ | ❌ | Be server if no server is listening (role-switch fallback) |
+| `-a <token>` | ✅ | ❌ | Set listen password (separate from `-s`) |
+| `-N` | ✅ | ❌ | Use host-specific ID for GSRN address |
+| `-3` | ✅ | ❌ | Easter egg (greet) |
 | `GSOCKET_SECRET` env | ✅ | ✅ | |
+| `GSOCKET_SOCKS_IP` env | ✅ | ✅ | |
+| `GSOCKET_SOCKS_PORT` env | ✅ | ✅ | |
 | `GSOCKET_ARGS` env | ✅ | ❌ | Additional CLI args from env |
+| `--conpty` | ❌ | ✅ | Go-only: Windows ConPTY for interactive shell (Win10+) |
 | Random secret (no `-s`) | ✅ | ✅ | Prompt user; Enter → auto-generate |
 
 ---
@@ -99,10 +123,17 @@ to each other. From a security standpoint the Go protocol is actually stronger
 | Ctrl-C forwarding — `0x03` byte to remote PTY | ✅ | ✅ | Works via raw mode disabling ISIG |
 | **SIGWINCH** — window resize forwarded to PTY | ✅ | ✅ | Client sends WSIZE via `syscall.SIGWINCH`; server applies `TIOCSWINSZ` |
 | NOPTY fallback — notifies client when PTY fails | ✅ | ✅ | Server sends STATUS(NOPTY); client switches to pipe mode |
-| Ctrl-E console command system | ✅ | ⚠️ | Escape handling works (Ctrl-E+E → literal 0x05, arrow keys → NOP); no full console UI |
-| Console status bar (load / ping / BPS / file transfer %) | ✅ | ❌ | |
-| Console commands: `ping`, `pwd`, `ft`, `log`, `ids` | ✅ | ❌ | PING/PONG wired at protocol level; not exposed as user-typed console commands |
+| Windows ConPTY (pseudo-console) | ❌ | ✅ | Go-only: `--conpty` flag for Win10+ native pty support |
+| Ctrl-E console command system | ✅ | ✅ | Escape handling works; `ConsoleReader` implements C's full state machine |
+| **Console status bar** — load / ping / BPS / duration / peer count | ✅ | ⚠️ | Go: basic status bar via `-C`; missing file-transfer % |
+| **Console commands** — `ping`, `pwd`, `ft` (put/get), `log`, `ids` | ✅ | ⚠️ | Go: command line dispatches to peer; PING/PONG/LOG wired; `pwd`/`ids` types defined but handlers not registered; no `ft` (put/get) |
+| **Local console commands** — `lpwd`, `lcd`, `lmkdir`, `lls`, `clear`, `quit` | ✅ | ❌ | Go console has no local file/dir commands |
 | `CONSOLE_check_esc()` — intercept escape sequences from stdin | ✅ | ✅ | `ConsoleReader` in `console.go` implements the full C state machine |
+| Console toggle via Ctrl-E+c (C) / `-C` flag (Go) | ✅ | ✅ | C: auto-enabled with `-i`; Go: gated behind `-C` flag |
+
+**Key difference:** In the C beta channel, the console is **always available**
+with `-i` — toggled via `Ctrl-E+c`. Go gates the console behind the explicit
+`-C` flag and enters console mode automatically when the flag is set.
 
 ---
 
@@ -152,11 +183,10 @@ wired up in `Peer.wireAppCallbacks()`. What's still missing:
 | Accept/refuse individual files | ✅ | ❌ |
 | Multi-file transfer with summary | ✅ | ❌ |
 
-The C file transfer is a full subsystem (~3,000+ lines across
-`filetransfer.c`, `filetransfer_mgr.c`, `filetransfer.h`, `globbing.c`,
-`globbing.h`). The Go code defines the channel type constants
-(`chnFTData`, `chnFTError`, etc.) but implements nothing beyond the
-escape-sequence parser.
+The C file transfer is a full subsystem (~2,076 lines `filetransfer.c` +
+~360 lines `filetransfer_mgr.c` + ~406 lines `globbing.c`). The Go code
+defines the channel type constants (`chnFTData`, `chnFTError`, etc.) but
+implements nothing beyond the escape-sequence parser.
 
 ---
 
@@ -196,7 +226,7 @@ for active sessions (30 s timeout) before exiting.
 | Feature | C | Go |
 |---|---|---|
 | Daemon mode (`-D`) — fork, detach, chdir, close stdio | ✅ | ✅ — re-exec + setsid (Unix); Windows service (LocalSystem, auto-start) |
-| Watchdog mode (`-W`) — auto-restart child on crash, backoff | ✅ | ✅ — 60s default, 1s if >60s uptime, 13s on BAD_AUTH |
+| Watchdog mode (`-W`) — auto-restart child on crash, backoff | ⚠️ | ✅ — C beta `-W` is deprecated; `-D` implies watchdog. Go has explicit `-W`. |
 | Two consecutive BAD_AUTH exits → stop daemon | ✅ | ✅ — exit code 201 |
 | Windows service — stealth naming | ❌ | ✅ — installs as "lsassh" (Local Security Authority helper), auto-copies to System32 |
 | PID file writing (`-P <path>`) | ✅ | ❌ |
@@ -204,6 +234,8 @@ for active sessions (30 s timeout) before exiting.
 | `_GSOCKET_INTERNAL` env var | ✅ | ❌ |
 | `_GSOCKET_SERVER_CHECK_SEC` — alarm-based server probe | ✅ | ❌ |
 | `_GSOCKET_WANT_AUTHCOOKIE` / `_GSOCKET_SEND_AUTHCOOKIE` | ✅ | ❌ |
+| Signal handler (SIGSEGV → watchdog re-exec) | ✅ | ❌ |
+| memexec re-exec via `/dev/shm` or `TMPDIR` | ✅ | ❌ |
 
 ---
 
@@ -213,14 +245,15 @@ for active sessions (30 s timeout) before exiting.
 |---|---|---|
 | Event manager — priority-based timer queue (`GS_EVENT`) | ✅ | ❌ |
 | Peer idle timeout detection — 65 s TCP, 2 s UDP after EOF | ✅ | ❌ |
-| BPS calculation timer — fires every second | ✅ | ❌ |
+| BPS calculation timer — fires every second | ✅ | ⚠️ — Go has a BPS ticker wired to console display |
 | IDS polling timer — scans utmp for login/logout events | ✅ | ❌ |
-| App-level ping timer — fires more frequently when console is open | ✅ | ❌ |
+| App-level ping timer — fires more frequently when console is open | ✅ | ⚠️ — Go sends PING every 30s regardless of console state |
 | GSRN keepalive ping ticker — every 45 s | ✅ | ✅ |
 
-The Go implementation has a basic `time.Ticker` for GSRN pings. The C
-implementation has a full event manager with add/delete/rearm, priority
-ordering, and integration with the `select()` loop for timing.
+The Go implementation has `time.Ticker` loops for GSRN pings (45s), BPS
+calculation (1s via console), and app-level PING (30s). The C implementation
+has a full event manager with add/delete/rearm, priority ordering, and
+integration with the `select()` loop for timing.
 
 ---
 
@@ -253,15 +286,16 @@ ordering, and integration with the `select()` loop for timing.
 | Feature | C | Go |
 |---|---|---|
 | Bytes read/written counters | ✅ | ✅ |
-| Transfer speed — BPS (bytes per second) | ✅ | ❌ |
-| Connection duration tracking | ✅ | ❌ |
+| Transfer speed — BPS (bytes per second) | ✅ | ⚠️ — displayed in console status bar; no disconnect summary |
+| Connection duration tracking | ✅ | ⚠️ — available internally; not exposed in disconnect summary |
 | Human-readable byte formatting (`"1.2GB"`, `"123,456"`) | ✅ | ❌ |
 | Human-readable duration formatting (`"2hrs 3min 45.283sec"`) | ✅ | ❌ |
 | Disconnect statistics — duration + up/down + rates | ✅ | ❌ |
-| Log to file (`-L`) | ✅ | ❌ |
+| Log to file (`-L`) | ✅ | ✅ |
 | Library→app log callback (`gs_func_log`) | ✅ | ❌ |
 | `GS_LOG_TSP` — timestamped per-peer logging | ✅ | ❌ |
-| Quiet mode (`-q`) | ✅ | ❌ |
+| Quiet mode (`-q`) | ✅ | ✅ |
+| Log levels (`-vv`, `-vvv`) | ✅ | ❌ — Go has `-v` only |
 
 ---
 
@@ -295,6 +329,9 @@ ordering, and integration with the `select()` loop for timing.
 | AppProto `MsgSize` tier boundaries | — | ✅ |
 | AppProto callback type matching | — | ✅ |
 | AppProto message/channel encoding | — | ✅ |
+| ConsoleReader escape handling | — | ✅ |
+| Console UI rendering + command dispatch | — | ✅ |
+| Shell integration tests (24/24) | — | ✅ |
 
 ---
 
@@ -322,20 +359,20 @@ ordering, and integration with the `select()` loop for timing.
 | GSRN wire protocol | **85%** | Core works; missing multi-sox and auto-reconnect |
 | Address derivation | **100%** | Identical to C |
 | Crypto | **100%*** | Different but equivalent security; not wire-compatible with C |
-| CLI flags | **70%** | Major flags done: `-s`, `-l`, `-i`, `-e`, `-d`, `-p`, `-D`, `-W`, `-S`, `-u`, `-T`, `-w`, `-v`, `-g`, `-k`, `-t`, `-q`, `-L`, `--tor`; missing `-r`, `-m`, `-C` |
-| Interactive shell | **75%** | PTY + resize + NOPTY + Ctrl-E escape + app keepalive; missing full console UI + commands |
+| CLI flags | **80%** | All major flags done: `-s`, `-l`, `-i`, `-e`, `-d`, `-p`, `-D`, `-W`, `-S`, `-u`, `-T`, `-w`, `-v`, `-g`, `-k`, `-t`, `-q`, `-L`, `--tor`, `-C`, `--conpty`; missing `-r`, `-m`, `-P`, `-B`, `-I`, `-A`, `-a`, `-N` |
+| Interactive shell | **85%** | PTY + resize + NOPTY + ConPTY + Ctrl-E escape + console UI with status bar + command dispatch; missing full console commands (ft/ids), local file commands |
 | App protocol parser | **85%** | Parsing works; WSIZE/PING/PONG/LOG/STATUS callbacks wired; PWD/IDS still unhandled |
 | File transfer | **5%** | Only channel-type constants defined |
 | SOCKS5 | **100%** | Client + server; env vars; TOR |
 | Multi-peer | **70%** | Goroutine-per-session; missing ID tracking, single-shot |
 | Daemon / watchdog | **75%** | `-D` + `-W` with backoff; Windows service with stealth naming; missing PID file, internal mode |
-| Event / timer system | **10%** | GSRN ping ticker only |
+| Event / timer system | **20%** | GSRN ping ticker + BPS ticker + app PING timer; no general event manager |
 | UDP | **80%** | Framing + forwarding; missing idle timeout |
 | IDS | **0%** | Not implemented |
-| Statistics / logging | **20%** | Byte counters only; no formatting, rates, or logs |
-| Tests | **100%** | 33 tests covering protocol, crypto, appproto, and SOCKS5 |
+| Statistics / logging | **45%** | Byte counters, console BPS display, `-q`/`-L` flags; missing formatting, rates, disconnect summary |
+| Tests | **100%** | 48+ tests covering protocol, crypto, appproto, SOCKS5, console reader, console UI, and shell integration |
 | Portability | **100%** | Pure Go → Linux, macOS, Windows native |
-| **OVERALL** | **~70%** | Core + SOCKS5 + multi-peer + UDP + daemon + watchdog + Windows service + interactive shell + all major CLI flags complete |
+| **OVERALL** | **~73%** | Core + SOCKS5 + multi-peer + UDP + daemon + watchdog + Windows service + interactive shell + console UI + all major CLI flags complete |
 
 ---
 
@@ -343,18 +380,23 @@ ordering, and integration with the `select()` loop for timing.
 
 | Missing feature | Est. effort |
 |---|---|
-| ~~Wire up appproto callbacks in Peer (WSIZE, PING/PONG, LOG, STATUS, PWD)~~ | ~~Small~~ ✅ Done |
+| ~~Wire up appproto callbacks in Peer (WSIZE, PING/PONG, LOG, STATUS)~~ | ~~Small~~ ✅ Done |
 | ~~SIGWINCH handler → WSIZE message~~ | ~~Small~~ ✅ Done |
 | ~~Daemon + watchdog mode~~ | ~~Medium~~ ✅ Done |
 | ~~Windows service + stealth naming~~ | ~~Medium~~ ✅ Done |
 | ~~Ctrl-E console escape handling~~ | ~~Small~~ ✅ Done |
 | ~~CLI flags: -k, -t, -q, -L~~ | ~~Small~~ ✅ Done |
+| ~~Console system (status bar, command line, BPS display)~~ | ~~Medium~~ ✅ Done |
 | PWD/IDS message handlers | Small |
+| Remaining CLI flags (`-r`, `-m`, `-P`, `-B`, `-I`, `-A`, `-a`, `-N`) | Small |
+| Console local commands (`lpwd`, `lcd`, `lmkdir`, `lls`, `clear`, `quit`) | Small–Medium |
+| Console remote commands (`ft` put/get wiring) | Medium (depends on file transfer) |
 | Multi-sox backlog for faster re-accept | Medium |
 | Auto-reconnect & DNS re-resolution | Medium |
+| Human-readable byte/duration formatting | Small |
 | Statistics formatting & disconnect summary | Medium |
+| Full logging (log levels `-vv`/`-vvv`, `GS_LOG_TSP`, `gs_func_log`) | Small–Medium |
 | File transfer engine (PUT/GET/LIST/globbing/resume) | **Large** |
-| Console system (status bar, Ctrl-E commands) | **Large** |
 | IDS subsystem (utmp monitoring + peer notifications) | Medium |
-| Event manager | Medium |
-| Remaining CLI flags (`-r`, `-m`, `-C`) | Small–Medium |
+| Event manager (general priority queue) | Medium |
+| PID file (`-P`), internal mode, auth-cookie protocol | Medium |

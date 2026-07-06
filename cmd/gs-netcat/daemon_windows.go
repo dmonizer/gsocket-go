@@ -241,14 +241,15 @@ func copyFile(src, dst string) error {
 // it blocks until the service stops and returns nil. If not running under
 // SCM, it returns an error immediately — the caller falls through to
 // console mode.
+//
+// No logging: we try silently on every startup since the SCM restart
+// does not include -D. If not under SCM, svc.Run returns an error
+// immediately and we continue as normal.
 func tryRunAsService() error {
-	log.Printf("service: tryRunAsService: calling svc.Run('%s')...", serviceName)
 	h := &serviceHandler{workerDone: make(chan struct{})}
 	err := svc.Run(serviceName, h)
 	if err != nil {
-		log.Printf("service: svc.Run() returned error: %s (not a service)", winErr(err))
 		return err
 	}
-	log.Printf("service: svc.Run() returned nil, workerErr=%v", h.workerErr)
 	return h.workerErr
 }
