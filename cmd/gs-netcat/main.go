@@ -89,8 +89,7 @@ func main() {
 		keyFile     = flag.String("k", "", "Read shared secret from key file")
 		quiet       = flag.Bool("q", false, "Quiet mode — suppress all output")
 		logFile     = flag.String("L", "", "Log to file instead of stderr")
-		consoleUI   = flag.Bool("C", false, "Enable console status bar and commands (Ctrl-E)")
-		conPTY      = flag.Bool("conpty", false, "Use Windows ConPTY for interactive shell (server only, Win10+)")
+		conPTY = flag.Bool("conpty", false, "Use Windows ConPTY for interactive shell (server only, Win10+)")
 	)
 	flag.Parse()
 
@@ -144,7 +143,6 @@ func main() {
 	daemonFlag := *daemon
 	watchdogFlag := *watchdog
 	quietFlag := *quiet
-	consoleUIFlag := *consoleUI
 	conPTYFlag := *conPTY
 
 	// realMain is the actual work: resolve secret, connect, run shell.
@@ -185,6 +183,7 @@ func main() {
 		}
 		if interactiveFlag {
 			opts = append(opts, gsocket.WithInteractive())
+			opts = append(opts, gsocket.WithConsole())
 		}
 		if targetAddrFlag != "" {
 			opts = append(opts, gsocket.WithTargetAddr(targetAddrFlag))
@@ -211,9 +210,6 @@ func main() {
 		}
 		if waitFlag {
 			opts = append(opts, gsocket.WithSockWait())
-		}
-		if consoleUIFlag {
-			opts = append(opts, gsocket.WithConsole())
 		}
 		if conPTYFlag {
 			opts = append(opts, gsocket.WithConPTY())
