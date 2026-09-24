@@ -11,12 +11,13 @@ import (
 // flushes the completed line. ANSI escape sequences are written to
 // display for instant local echo.
 //
-// Safe for concurrent use: all methods that write to display must be
-// called while holding the display mutex.
+// Editing methods are called by the input goroutine. Display methods
+// acquire the shared display mutex internally.
 type LineEditor struct {
 	buf       []byte
-	pos       int     // cursor position within buf
-	saved     bool    // true after saving cursor position for this line
+	pos       int  // cursor position within buf
+	saved     bool // true after drawing this line
+	drawnPos  int  // cursor offset at the last display update
 	display   io.Writer
 	displayMu *sync.Mutex // serialises display writes with channel output
 }
@@ -97,12 +98,13 @@ func (le *LineEditor) Flush() string {
 	le.buf = le.buf[:0]
 	le.pos = 0
 	le.saved = false
+	le.drawnPos = 0
 	return s
 }
 
 // Redraw clears the current line and redraws the buffer with cursor.
-// On first call per line the cursor position is saved; subsequent
-// calls restore that position so the shell prompt is preserved.
+// Cursor movement is relative to the last rendered position. This leaves
+// the terminal save slot available to the console UI.
 func (le *LineEditor) Redraw() {
 	if le.display == nil {
 		return
@@ -110,20 +112,17 @@ func (le *LineEditor) Redraw() {
 	le.displayMu.Lock()
 	defer le.displayMu.Unlock()
 
-	if !le.saved {
-		// First keystroke of this line — save cursor position.
-		fmt.Fprintf(le.display, "\033[s")
-		le.saved = true
-	} else {
-		// Restore saved position.
-		fmt.Fprintf(le.display, "\033[u")
+	if le.saved && le.drawnPos > 0 {
+		fmt.Fprintf(le.display, "\033[%dD", le.drawnPos)
 	}
-	// Clear from saved position to end of line, write buffer, position cursor.
+	le.saved = true
+	// Clear from the input start to end of line, then position the cursor.
 	fmt.Fprintf(le.display, "\033[K%s", le.buf)
 	if le.pos < len(le.buf) {
 		// Cursor is past the buffer end (after write) — move back.
 		fmt.Fprintf(le.display, "\033[%dD", len(le.buf)-le.pos)
 	}
+	le.drawnPos = le.pos
 }
 
 // RepositionCursor moves the cursor without redrawing. Used after
@@ -134,7 +133,12 @@ func (le *LineEditor) RepositionCursor() {
 	}
 	le.displayMu.Lock()
 	defer le.displayMu.Unlock()
-	fmt.Fprintf(le.display, "\033[u\033[%dC", le.pos)
+	if delta := le.pos - le.drawnPos; delta > 0 {
+		fmt.Fprintf(le.display, "\033[%dC", delta)
+	} else if delta < 0 {
+		fmt.Fprintf(le.display, "\033[%dD", -delta)
+	}
+	le.drawnPos = le.pos
 }
 
 // Newline advances to the next line (called on Enter before flush).

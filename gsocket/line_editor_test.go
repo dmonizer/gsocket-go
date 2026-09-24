@@ -99,7 +99,7 @@ func TestLineEditorInsertMiddle(t *testing.T) {
 	ed := newTestEditor()
 	ed.Insert('a')
 	ed.Insert('c')
-	ed.MoveLeft() // cursor between 'a' and 'c'
+	ed.MoveLeft()  // cursor between 'a' and 'c'
 	ed.Insert('b') // insert 'b'
 	if string(ed.Bytes()) != "abc" {
 		t.Fatalf("got %q, want %q", ed.Bytes(), "abc")
@@ -132,24 +132,27 @@ func TestLineEditorRedrawOutput(t *testing.T) {
 	var mu sync.Mutex
 	ed := NewLineEditor(&display, &mu)
 
-	// First keystroke: should save cursor position.
 	ed.Insert('h')
 	ed.Redraw()
-	out := display.String()
-	if !bytes.Contains([]byte(out), []byte("\033[s")) {
-		t.Fatalf("first redraw missing cursor save: %q", out)
+	if got := display.String(); got != "\033[Kh" {
+		t.Fatalf("first redraw: %q", got)
 	}
 	display.Reset()
-
-	// Second keystroke: should restore, not save.
 	ed.Insert('i')
 	ed.Redraw()
-	out = display.String()
-	if bytes.Contains([]byte(out), []byte("\033[s")) {
-		t.Fatalf("second redraw should not save cursor: %q", out)
+	if got := display.String(); got != "\033[1D\033[Khi" {
+		t.Fatalf("second redraw: %q", got)
 	}
-	if !bytes.Contains([]byte(out), []byte("\033[u")) {
-		t.Fatalf("second redraw missing cursor restore: %q", out)
+	display.Reset()
+	ed.Home()
+	ed.RepositionCursor()
+	if got := display.String(); got != "\033[2D" {
+		t.Fatalf("home: %q", got)
+	}
+	display.Reset()
+	ed.RepositionCursor()
+	if display.Len() != 0 {
+		t.Fatalf("stationary cursor moved: %q", display.String())
 	}
 }
 

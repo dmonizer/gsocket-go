@@ -3,6 +3,7 @@ package gsocket
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // ConsoleReader wraps an io.Reader (normally os.Stdin) and filters
@@ -34,7 +35,7 @@ type ConsoleReader struct {
 	pending bool       // true when last char was 0x05 and we're in escape mode
 
 	// Console mode state (set by Console UI via SetConsoleMode).
-	consoleMode bool
+	consoleMode atomic.Bool
 	cmdBuf      []byte
 
 	// Callbacks for Ctrl-E events. Set by Console UI.
@@ -57,7 +58,7 @@ func NewConsoleReader(src io.Reader) *ConsoleReader {
 
 // SetConsoleMode toggles command accumulation mode.
 func (cr *ConsoleReader) SetConsoleMode(on bool) {
-	cr.consoleMode = on
+	cr.consoleMode.Store(on)
 }
 
 // SetLineMode enables local line editing. Characters are buffered
@@ -116,7 +117,24 @@ func (cr *ConsoleReader) Read(p []byte) (n int, err error) {
 
 		if cr.pending {
 			cr.pending = false
-			if cr.consoleMode {
+			// Ctrl-E + Arrow key: consume ESC [ direction from
+			// the current chunk (non-blocking). Matches the
+			// readWithLineEdit path which already handles this.
+			if c == 0x1B && i+2 < len(src) && src[i+1] == '[' {
+				i += 2 // skip past ESC and '['
+				switch src[i] {
+				case 'A':
+					if cr.onFocusUp != nil {
+						cr.onFocusUp()
+					}
+				case 'B':
+					if cr.onFocusDown != nil {
+						cr.onFocusDown()
+					}
+				}
+				continue
+			}
+			if cr.consoleMode.Load() {
 				cr.handleConsoleEscape(c)
 			} else {
 				if c == 'c' && cr.onCloseConsole != nil {
@@ -133,7 +151,7 @@ func (cr *ConsoleReader) Read(p []byte) (n int, err error) {
 			continue
 		}
 
-		if cr.consoleMode {
+		if cr.consoleMode.Load() {
 			cr.handleConsoleChar(c)
 			continue
 		}
@@ -160,7 +178,7 @@ func (cr *ConsoleReader) readWithLineEdit(p []byte) (n int, err error) {
 
 		// In console mode, accumulate in cmdBuf instead of
 		// line buffer. Enter dispatches the command.
-		if cr.consoleMode {
+		if cr.consoleMode.Load() {
 			if cr.pending {
 				cr.pending = false
 				// Arrow keys after Ctrl-E: switch focus.

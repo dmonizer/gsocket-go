@@ -140,3 +140,143 @@ func TestConsoleReaderMultipleCtrlE(t *testing.T) {
 		t.Fatalf("got %d bytes [%x], want [05 61]", n, buf[:n])
 	}
 }
+
+// TestConsoleReaderArrowKeys verifies that Ctrl-E + arrow keys trigger
+// focus callbacks in shell mode without forwarding any bytes.
+func TestConsoleReaderArrowKeys(t *testing.T) {
+	t.Run("CtrlE+Up_ShellMode", func(t *testing.T) {
+		// Ctrl-E + ESC [ A  → onFocusUp
+		input := []byte{0x05, 0x1B, '[', 'A'}
+		cr := NewConsoleReader(bytes.NewReader(input))
+		var focusUpCalled bool
+		cr.onFocusUp = func() { focusUpCalled = true }
+		buf := make([]byte, 1024)
+		n, err := cr.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("arrow should forward 0 bytes, got %d", n)
+		}
+		if !focusUpCalled {
+			t.Fatal("onFocusUp was not called")
+		}
+	})
+	t.Run("CtrlE+Down_ShellMode", func(t *testing.T) {
+		// Ctrl-E + ESC [ B  → onFocusDown
+		input := []byte{0x05, 0x1B, '[', 'B'}
+		cr := NewConsoleReader(bytes.NewReader(input))
+		var focusDownCalled bool
+		cr.onFocusDown = func() { focusDownCalled = true }
+		buf := make([]byte, 1024)
+		n, err := cr.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("arrow should forward 0 bytes, got %d", n)
+		}
+		if !focusDownCalled {
+			t.Fatal("onFocusDown was not called")
+		}
+	})
+	t.Run("CtrlE+Up_ConsoleMode", func(t *testing.T) {
+		input := []byte{0x05, 0x1B, '[', 'A'}
+		cr := NewConsoleReader(bytes.NewReader(input))
+		cr.SetConsoleMode(true)
+		var focusUpCalled bool
+		cr.onFocusUp = func() { focusUpCalled = true }
+		buf := make([]byte, 1024)
+		n, err := cr.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("arrow should forward 0 bytes, got %d", n)
+		}
+		if !focusUpCalled {
+			t.Fatal("onFocusUp was not called in console mode")
+		}
+	})
+	t.Run("CtrlE+Down_ConsoleMode", func(t *testing.T) {
+		input := []byte{0x05, 0x1B, '[', 'B'}
+		cr := NewConsoleReader(bytes.NewReader(input))
+		cr.SetConsoleMode(true)
+		var focusDownCalled bool
+		cr.onFocusDown = func() { focusDownCalled = true }
+		buf := make([]byte, 1024)
+		n, err := cr.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("arrow should forward 0 bytes, got %d", n)
+		}
+		if !focusDownCalled {
+			t.Fatal("onFocusDown was not called in console mode")
+		}
+	})
+}
+
+// TestConsoleReaderCtrlE_C_ShellMode verifies Ctrl-E + c triggers
+// the close-console callback in shell mode.
+func TestConsoleReaderCtrlE_C_ShellMode(t *testing.T) {
+	input := []byte{0x05, 'c'}
+	cr := NewConsoleReader(bytes.NewReader(input))
+	var closeCalled bool
+	cr.onCloseConsole = func() { closeCalled = true }
+	buf := make([]byte, 1024)
+	n, err := cr.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("Ctrl-E+c should forward 0 bytes, got %d", n)
+	}
+	if !closeCalled {
+		t.Fatal("onCloseConsole was not called")
+	}
+}
+
+// TestConsoleReaderArrowKeys_LineEdit verifies arrow-based focus
+// switching when line editing is active.
+func TestConsoleReaderArrowKeys_LineEdit(t *testing.T) {
+	t.Run("CtrlE+Up_SwitchesToShell", func(t *testing.T) {
+		input := []byte{0x05, 0x1B, '[', 'A'}
+		cr := NewConsoleReader(bytes.NewReader(input))
+		var focusUpCalled bool
+		cr.onFocusUp = func() { focusUpCalled = true }
+		ed := NewLineEditor(nil, nil)
+		cr.SetLineMode(true, ed)
+		buf := make([]byte, 1024)
+		n, err := cr.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("arrow should forward 0 bytes, got %d", n)
+		}
+		if !focusUpCalled {
+			t.Fatal("onFocusUp was not called in line-edit mode")
+		}
+	})
+	t.Run("CtrlE+Down_SwitchesToConsole", func(t *testing.T) {
+		input := []byte{0x05, 0x1B, '[', 'B'}
+		cr := NewConsoleReader(bytes.NewReader(input))
+		var focusDownCalled bool
+		cr.onFocusDown = func() { focusDownCalled = true }
+		ed := NewLineEditor(nil, nil)
+		cr.SetLineMode(true, ed)
+		buf := make([]byte, 1024)
+		n, err := cr.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("arrow should forward 0 bytes, got %d", n)
+		}
+		if !focusDownCalled {
+			t.Fatal("onFocusDown was not called in line-edit mode")
+		}
+	})
+}

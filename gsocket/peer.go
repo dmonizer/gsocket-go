@@ -576,10 +576,6 @@ func (p *Peer) runClientInteractive() error {
 	}
 	defer term.Restore(fd, oldState)
 
-	// Register SIGWINCH handler. If console UI is active, also notify
-	// the Console so it can adjust the scroll region.
-	p.registerWinchHandler()
-
 	// Shared stdout mutex — serialises line-editor ANSI output
 	// with channel→stdout writes regardless of -C mode.
 	stdoutMu := &sync.Mutex{}
@@ -602,6 +598,9 @@ func (p *Peer) runClientInteractive() error {
 		p.consoleReader = cr
 		stdinReader = cr
 	}
+
+	// Start resize handling after display synchronization is initialized.
+	p.registerWinchHandler()
 
 	// Drain the first message from the channel before starting
 	// stdin. The server sends the NOPTY status (or shell prompt)

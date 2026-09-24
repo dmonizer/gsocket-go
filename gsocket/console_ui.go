@@ -4,34 +4,88 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/term"
 )
 
+// ANSI escape sequence fragments. Prepend CSI ("\x1b[") to build a
+// complete control sequence, e.g. csi("2J") → ESC[2J (clear screen).
+const (
+	CSI = "\x1b["
+
+	// Cursor movement.
+	CursorUp    = "A"
+	CursorDown  = "B"
+	CursorRight = "C"
+	CursorLeft  = "D"
+	CursorNext  = "E" // Beginning of Nth next line
+	CursorPrev  = "F" // Beginning of Nth previous line
+	CursorCol   = "G" // Horizontal absolute
+	CursorPos   = "H" // row;col (default 1;1 = home)
+
+	// Erase.
+	EraseDisplayBelow  = "J"  // ESC[J or ESC[0J — erase from cursor to end
+	EraseDisplayAll    = "2J" // ESC[2J — erase entire display
+	EraseLineToEnd     = "K"  // ESC[K or ESC[0K
+	EraseLineFromStart = "1K" // ESC[1K
+	EraseEntireLine    = "2K" // ESC[2K
+
+	// Scrolling.
+	ScrollUp        = "S"
+	ScrollDown      = "T"
+	SetScrollRegion = "r" // ESC[r resets; ESC[top;bot r sets region
+
+	// Save/restore cursor (ANSI — used by drawStatusBar for transient saves).
+	SaveCursor    = "s"
+	RestoreCursor = "u"
+
+	// Complete DEC sequences; these must not be prefixed with CSI.
+	// ANSI and DEC cursor saves may share a single terminal save slot.
+	DECSaveCursor    = "\x1b7"
+	DECRestoreCursor = "\x1b8"
+
+	// Text attributes (SGR).
+	SGR = "m"
+
+	// Device status.
+	DeviceStatus = "n"
+
+	// Modes.
+	SetMode   = "h"
+	ResetMode = "l"
+)
+
 // consoleFocus indicates which tier (shell or console) has keyboard focus.
 type consoleFocus int
 
 const (
-	focusShell   consoleFocus = iota
+	focusShell consoleFocus = iota
 	focusConsole
 )
 
-// Console manages a split-screen terminal UI with a fixed 2-line footer.
-// The console is initially hidden; Ctrl-E + c toggles visibility.
+// Console manages a split-screen terminal UI. The bottom portion of the
+// screen is a console area (~15% of terminal height): a status bar showing
+// transfer speeds / RTT / duration, and a "console>" command prompt.
 //
-// When visible:
+// Initially hidden; Ctrl-E + c toggles visibility. Ctrl-E + ↓ enters
+// command mode; Ctrl-E + ↑ returns focus to the shell.
 //
-//	   ┌──────────────────────────────────────┐
-//	   │  shell output (scrolls normally)      │  ← rows 0..N-3
-//	   │  $ ls -la                             │
-//	   ├──────────────────────────────────────┤
-//	   │  [↑1.2KB/s ↓0.8KB/s] [rtt 45ms] ...  │  ← row N-2: status bar
-//	   │  console> ping█                       │  ← row N-1: command line
-//	   └──────────────────────────────────────┘
+// When visible (24-row terminal, 4-row console area):
+//
+//	┌──────────────────────────────────────┐
+//	│  shell output (scrolls normally)      │  ← rows 1..20
+//	│  $ ls -la                             │
+//	├──────────────────────────────────────┤
+//	│  [↑1.2KB/s ↓0.8KB/s] [rtt 45ms] ...  │  ← row 21: status bar
+//	│                                      │  ← row 22-23: console output
+//	│  console> ping█                       │  ← row 24: command line
+//	└──────────────────────────────────────┘
 type Console struct {
-	reader *ConsoleReader
+	reader  *ConsoleReader
+	display io.Writer
 
 	// Terminal dimensions.
 	rows int
@@ -41,7 +95,8 @@ type Console struct {
 	focus   consoleFocus
 	visible bool // true when the console footer is shown
 
-	// Serialises stdout writes with the line editor (set by EnableLineEditing).
+	// All display transactions lock mu, then stdoutMu. The line editor
+	// only locks stdoutMu and never calls into Console while holding it.
 	stdoutMu *sync.Mutex
 
 	// statusDirty is set when the status bar needs redrawing but
@@ -63,12 +118,30 @@ type Console struct {
 	OnCommand func(string)
 }
 
+// csi builds a complete ANSI escape sequence from fragments.
+// When called without format arguments, %-verbs pass through
+// unchanged so the caller can use them in an outer fmt.Fprintf.
+//
+//	csi("2J")         → "\x1b[2J"       (completed immediately)
+//	csi("%d;1H", 5)   → "\x1b[5;1H"     (completed immediately)
+//	csi("1;%dr")      → "\x1b[1;%dr"    (pass-through for outer Fprintf)
+func csi(format string, args ...any) string {
+	if len(args) == 0 {
+		return CSI + format
+	}
+	return fmt.Sprintf(CSI+format, args...)
+}
+
+// --- construction ---
+
 // NewConsole creates a Console wrapping the given stdin reader (normally
 // os.Stdin). The console is initially hidden — status bar and command
 // line are not shown until the user activates them with Ctrl-E + c.
 func NewConsole(stdin io.Reader) *Console {
 	c := &Console{
 		reader:    NewConsoleReader(stdin),
+		display:   os.Stdout,
+		stdoutMu:  &sync.Mutex{},
 		focus:     focusShell,
 		startTime: time.Now(),
 		running:   true,
@@ -85,20 +158,34 @@ func NewConsole(stdin io.Reader) *Console {
 }
 
 // Init clears the screen for a clean session start. Does NOT show the
-// console footer — that is activated later by the user via Ctrl-E + c.
+// console — that is activated later by the user via Ctrl-E + c.
 func (c *Console) Init() {
-	if c.stdoutMu != nil {
-		c.stdoutMu.Lock()
-		defer c.stdoutMu.Unlock()
-	}
-	fmt.Fprint(os.Stdout, "\033[2J\033[H")
+	c.lockDisplay()
+	defer c.unlockDisplay()
+	fmt.Fprint(c.display, csi(EraseDisplayAll)+csi(CursorPos))
 }
+
+// lockDisplay serializes a complete cursor movement / paint / restore
+// transaction with shell output and local line editing.
+func (c *Console) lockDisplay() {
+	c.mu.Lock()
+	c.stdoutMu.Lock()
+}
+
+func (c *Console) unlockDisplay() {
+	c.stdoutMu.Unlock()
+	c.mu.Unlock()
+}
+
+// --- I/O ---
 
 // EnableLineEditing enables local line editing on the underlying
 // ConsoleReader. Called when the server reports no PTY.
 func (c *Console) EnableLineEditing(stdoutMu *sync.Mutex) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.stdoutMu = stdoutMu
-	ed := NewLineEditor(os.Stdout, stdoutMu)
+	ed := NewLineEditor(c.display, stdoutMu)
 	c.reader.SetLineMode(true, ed)
 	c.reader.onLineEntered = c.flushDeferredStatusBar
 }
@@ -108,32 +195,36 @@ func (c *Console) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
 }
 
-// Write writes shell output to the terminal. When the console is
-// visible, the scroll region confines scrolling automatically.
+// Write restores the shell cursor before writing while the console owns
+// focus, then saves the updated shell cursor and repaints the command line.
 func (c *Console) Write(data []byte) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
 	}
-	if c.stdoutMu != nil {
-		c.stdoutMu.Lock()
-		defer c.stdoutMu.Unlock()
+	c.lockDisplay()
+	defer c.unlockDisplay()
+	if c.visible && c.focus == focusConsole {
+		fmt.Fprint(c.display, DECRestoreCursor)
 	}
-	return os.Stdout.Write(data)
+	n, err := c.display.Write(data)
+	if c.visible && c.focus == focusConsole {
+		fmt.Fprint(c.display, DECSaveCursor)
+		c.renderStatusBar()
+		c.renderCommandLine()
+	}
+	return n, err
 }
 
 // Close resets the terminal to normal operation. Idempotent.
 func (c *Console) Close() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.lockDisplay()
+	defer c.unlockDisplay()
 	if !c.running {
 		return
 	}
 	c.running = false
 	if c.visible {
-		c.visible = false
-		fmt.Fprint(os.Stdout, "\033[r")
-		fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K", c.rows-1)
-		fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K", c.rows)
+		c.hide()
 	}
 }
 
@@ -143,6 +234,8 @@ func (c *Console) Running() bool {
 	defer c.mu.Unlock()
 	return c.running
 }
+
+// --- status bar updates ---
 
 // SetPingRTT updates the ping RTT shown in the status bar.
 func (c *Console) SetPingRTT(rtt time.Duration) {
@@ -169,51 +262,121 @@ func (c *Console) SetComment(s string) {
 	c.drawStatusBar()
 }
 
-// HandleWinch updates the terminal dimensions and adjusts the scroll region.
+// HandleWinch updates the terminal dimensions and re-applies the
+// scroll region if the console is visible.
 func (c *Console) HandleWinch(rows, cols int) {
-	c.mu.Lock()
-	c.rows = rows
-	c.cols = cols
-	visible := c.visible
-	conMode := c.focus == focusConsole
-	c.mu.Unlock()
-	if visible && c.rows > 2 {
-		fmt.Fprintf(os.Stdout, "\033[1;%dr", c.rows-2)
+	if rows < 3 || cols < 1 {
+		return
 	}
-	c.drawStatusBar()
-	if conMode {
-		c.redrawCommandLine()
+	c.lockDisplay()
+	defer c.unlockDisplay()
+	if c.visible {
+		if c.focus == focusConsole {
+			fmt.Fprint(c.display, DECRestoreCursor)
+		}
+		fmt.Fprint(c.display, DECSaveCursor)
+		// Clear the previous footer too, including rows that become shell
+		// space when the terminal grows.
+		c.clearFooter(min(c.rows, rows))
 	}
-}
-
-// --- visibility toggling ---
-
-// show sets the scroll region and draws the status bar.
-func (c *Console) show() {
-	c.visible = true
-	if c.rows > 2 {
-		fmt.Fprintf(os.Stdout, "\033[1;%dr", c.rows-2)
+	c.rows, c.cols = rows, cols
+	if !c.running || !c.visible {
+		return
 	}
+	// Margin changes home the cursor. Restore it before making room
+	// within the new physical screen dimensions.
+	fmt.Fprint(c.display, csi(SetScrollRegion), DECRestoreCursor)
+	c.reserveFooter()
+	fmt.Fprint(c.display, DECSaveCursor)
+	c.splitScreen()
 	c.renderStatusBar()
+	if c.focus == focusConsole {
+		c.renderCommandLine()
+	} else {
+		fmt.Fprint(c.display, DECRestoreCursor)
+	}
 }
 
-// hide clears the footer and resets the scroll region.
+// --- dynamic console sizing ---
+
+// consoleHeight returns the number of rows to reserve at the bottom of
+// the screen. It scales with terminal size (~15%) but enforces sensible
+// minimums and maximums.
+func (c *Console) consoleHeight() int {
+	h := max(min(c.rows/6, 10), 3) // clamp to [3, 10]
+	if h >= c.rows {
+		return c.rows - 1
+	}
+	return h
+}
+
+// statusRow returns the 1-based row of the status bar within the
+// console area (first row of the reserved region).
+func (c *Console) statusRow() int {
+	return c.rows - c.consoleHeight() + 1
+}
+
+// lastShellRow returns the last row of the scrolling shell region.
+func (c *Console) lastShellRow() int {
+	return c.rows - c.consoleHeight()
+}
+
+// --- screen split / unsplit (single responsibility) ---
+
+// splitScreen changes margins without replacing the saved shell cursor.
+// The caller owns the display lock and has already saved that cursor.
+func (c *Console) splitScreen() {
+	fmt.Fprintf(c.display, csi("1;%d"+SetScrollRegion), c.lastShellRow())
+	c.clearFooter(c.rows)
+}
+
+func (c *Console) clearFooter(lastRow int) {
+	for row := c.statusRow(); row <= lastRow; row++ {
+		fmt.Fprintf(c.display, csi("%d;1"+CursorPos)+csi(EraseEntireLine), row)
+	}
+}
+
+// unsplitScreen preserves the shell position across the margin reset,
+// which itself moves the terminal cursor home.
+func (c *Console) unsplitScreen() {
+	c.clearFooter(c.rows)
+	fmt.Fprint(c.display, csi(SetScrollRegion), DECRestoreCursor)
+}
+
+// reserveFooter advances by the footer height, scrolling only if needed,
+// then moves back up by that height. This keeps the shell cursor aligned
+// with its text, preserves the column, and leaves room below it. IND (ESC D)
+// preserves the column even when newline mode is enabled.
+func (c *Console) reserveFooter() {
+	h := c.consoleHeight()
+	fmt.Fprint(c.display, strings.Repeat("\x1bD", h), csi("%d"+CursorUp, h))
+}
+
+func (c *Console) show() {
+	c.reserveFooter()
+	fmt.Fprint(c.display, DECSaveCursor)
+	c.visible = true
+	c.focus = focusConsole
+	c.splitScreen()
+	c.renderStatusBar()
+	c.renderCommandLine()
+	c.reader.SetConsoleMode(true)
+}
+
 func (c *Console) hide() {
+	if c.focus == focusShell {
+		fmt.Fprint(c.display, DECSaveCursor)
+	}
+	c.unsplitScreen()
 	c.visible = false
+	c.statusDirty = false
 	c.reader.SetConsoleMode(false)
 	c.focus = focusShell
-	fmt.Fprint(os.Stdout, "\033[r")
-	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K", c.rows-1)
-	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K", c.rows)
-	if c.rows > 2 {
-		fmt.Fprintf(os.Stdout, "\033[%d;1H", c.rows-2)
-	}
 }
 
-// toggleVisibility toggles the console footer on/off (Ctrl-E + c).
 func (c *Console) toggleVisibility() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.lockDisplay()
+	defer c.unlockDisplay()
 	if !c.running {
 		return
 	}
@@ -226,48 +389,32 @@ func (c *Console) toggleVisibility() {
 
 // --- focus switching ---
 
-// enterCommandMode switches focus to the console command line.
-// If the console is hidden, shows it first.
 func (c *Console) enterCommandMode() {
-	c.mu.Lock()
-	if !c.running {
-		c.mu.Unlock()
+	c.lockDisplay()
+	defer c.unlockDisplay()
+	if !c.running || c.focus == focusConsole {
 		return
 	}
 	if !c.visible {
 		c.show()
+		return
 	}
+	fmt.Fprint(c.display, DECSaveCursor)
 	c.focus = focusConsole
-	c.mu.Unlock()
 	c.reader.SetConsoleMode(true)
-	if c.stdoutMu != nil {
-		c.stdoutMu.Lock()
-		defer c.stdoutMu.Unlock()
-	}
-	c.redrawCommandLine()
+	c.renderCommandLine()
 }
 
-// exitCommandMode switches focus back to the shell.
 func (c *Console) exitCommandMode() {
-	c.mu.Lock()
+	c.lockDisplay()
+	defer c.unlockDisplay()
 	if !c.running || c.focus != focusConsole {
-		c.mu.Unlock()
 		return
 	}
 	c.focus = focusShell
-	c.mu.Unlock()
 	c.reader.SetConsoleMode(false)
-	if c.stdoutMu != nil {
-		c.stdoutMu.Lock()
-		defer c.stdoutMu.Unlock()
-	}
-	// Clear command line, leave cursor in shell area.
-	if c.rows > 0 {
-		fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K", c.rows)
-	}
-	if c.rows > 2 {
-		fmt.Fprintf(os.Stdout, "\033[%d;1H", c.rows-2)
-	}
+	fmt.Fprintf(c.display, csi("%d;1"+CursorPos)+csi(EraseEntireLine), c.rows)
+	fmt.Fprint(c.display, DECRestoreCursor)
 }
 
 // --- command dispatch ---
@@ -294,33 +441,60 @@ func (c *Console) measureTerminal() {
 
 // --- status bar rendering ---
 
+// drawStatusBar is the public entry point for status bar updates. It
+// saves and restores the cursor so the caller's position is undisturbed.
 func (c *Console) drawStatusBar() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.visible {
+	c.lockDisplay()
+	defer c.unlockDisplay()
+	if !c.running || !c.visible {
 		return
 	}
-	// Defer while line-editing in shell mode.
 	if c.reader.lineMode && c.focus == focusShell {
 		c.statusDirty = true
 		return
 	}
+	c.paintStatusBar()
+}
+
+// While console focus is active, the save slot belongs to the shell.
+// Repaint the command prompt directly instead of overwriting that slot.
+func (c *Console) paintStatusBar() {
+	if c.focus == focusShell {
+		fmt.Fprint(c.display, DECSaveCursor)
+	}
 	c.renderStatusBar()
+	if c.focus == focusConsole {
+		c.renderCommandLine()
+	} else {
+		fmt.Fprint(c.display, DECRestoreCursor)
+	}
 }
 
 func (c *Console) flushDeferredStatusBar() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.statusDirty {
-		c.statusDirty = false
-		c.renderStatusBar()
+	c.lockDisplay()
+	defer c.unlockDisplay()
+	if !c.statusDirty {
+		return
+	}
+	c.statusDirty = false
+	if c.running && c.visible {
+		c.paintStatusBar()
 	}
 }
 
+// renderStatusBar paints the status line at the top of the console
+// area. It does NOT save/restore the cursor — callers are responsible
+// for positioning. After the call the cursor is at the status row.
 func (c *Console) renderStatusBar() {
-	if c.rows < 2 {
+	sr := c.statusRow()
+	if sr < 1 {
 		return
 	}
+	parts := c.buildStatusLine()
+	fmt.Fprintf(c.display, csi("%d;1"+CursorPos)+csi(EraseEntireLine)+"%s", sr, parts)
+}
+
+func (c *Console) buildStatusLine() string {
 	var parts string
 	if c.bpsUp > 0 || c.bpsDown > 0 {
 		parts += fmt.Sprintf("[↑%s/s ↓%s/s] ", formatSize(c.bpsUp), formatSize(c.bpsDown))
@@ -336,18 +510,15 @@ func (c *Console) renderStatusBar() {
 	if len(parts) > c.cols {
 		parts = parts[:c.cols]
 	}
-	fmt.Fprintf(os.Stdout, "\033[s\033[%d;1H\033[K%s\033[u", c.rows-1, parts)
-	if c.focus == focusConsole {
-		c.renderCommandLine()
-	}
+	return parts
 }
 
 // --- command line rendering ---
 
 func (c *Console) redrawCommandLine() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.focus == focusConsole {
+	c.lockDisplay()
+	defer c.unlockDisplay()
+	if c.running && c.visible && c.focus == focusConsole {
 		c.renderCommandLine()
 	}
 }
@@ -360,7 +531,7 @@ func (c *Console) renderCommandLine() {
 	if len(prompt) > c.cols {
 		prompt = prompt[:c.cols]
 	}
-	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[K%s", c.rows, prompt)
+	fmt.Fprintf(c.display, csi("%d;1"+CursorPos)+csi(EraseEntireLine)+"%s", c.rows, prompt)
 }
 
 // formatSize formats a byte count for human display.
