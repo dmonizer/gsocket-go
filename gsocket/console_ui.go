@@ -116,6 +116,8 @@ type Console struct {
 
 	// Command dispatch callback (set by Peer).
 	OnCommand func(string)
+	// Called after showing or hiding the console changes the shell area.
+	OnShellResize func(rows, cols int)
 }
 
 // csi builds a complete ANSI escape sequence from fragments.
@@ -321,6 +323,16 @@ func (c *Console) lastShellRow() int {
 	return c.rows - c.consoleHeight()
 }
 
+// ShellSize returns the dimensions available to programs in the remote PTY.
+func (c *Console) ShellSize() (rows, cols int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.visible {
+		return c.lastShellRow(), c.cols
+	}
+	return c.rows, c.cols
+}
+
 // --- screen split / unsplit (single responsibility) ---
 
 // splitScreen changes margins without replacing the saved shell cursor.
@@ -376,8 +388,8 @@ func (c *Console) hide() {
 
 func (c *Console) toggleVisibility() {
 	c.lockDisplay()
-	defer c.unlockDisplay()
 	if !c.running {
+		c.unlockDisplay()
 		return
 	}
 	if c.visible {
@@ -385,24 +397,38 @@ func (c *Console) toggleVisibility() {
 	} else {
 		c.show()
 	}
+	rows, cols := c.rows, c.cols
+	if c.visible {
+		rows = c.lastShellRow()
+	}
+	c.unlockDisplay()
+	if c.OnShellResize != nil {
+		c.OnShellResize(rows, cols)
+	}
 }
 
 // --- focus switching ---
 
 func (c *Console) enterCommandMode() {
 	c.lockDisplay()
-	defer c.unlockDisplay()
 	if !c.running || c.focus == focusConsole {
+		c.unlockDisplay()
 		return
 	}
 	if !c.visible {
 		c.show()
+		rows, cols := c.lastShellRow(), c.cols
+		c.unlockDisplay()
+		if c.OnShellResize != nil {
+			c.OnShellResize(rows, cols)
+		}
 		return
 	}
 	fmt.Fprint(c.display, DECSaveCursor)
 	c.focus = focusConsole
 	c.reader.SetConsoleMode(true)
 	c.renderCommandLine()
+	c.unlockDisplay()
 }
 
 func (c *Console) exitCommandMode() {

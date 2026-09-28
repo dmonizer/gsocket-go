@@ -18,6 +18,7 @@ GO_LEGACY     := $(GO_LEGACY_DIR)/bin/go
 GO_LEGACY_VER := v1.26.4-1
 GO_LEGACY_TAR := go-legacy-win7-1.26.4-1.linux_amd64.tar.gz
 GO_LEGACY_URL := https://github.com/thongtech/go-legacy-win7/releases/download/$(GO_LEGACY_VER)/$(GO_LEGACY_TAR)
+GO_LEGACY_SHA256 := 7884551101b9fe41db58c837174eef4fa95fa10edd41a5b8b3b4b043311d8a42
 
 # --- Platform / Architecture matrices ---
 LINUX_ARCHS   := amd64 arm64 386 arm
@@ -43,7 +44,7 @@ build: default
 .PHONY: linux
 linux:
 	@mkdir -p $(OUTDIR)/linux
-	@for arch in $(LINUX_ARCHS); do \
+	@set -e; for arch in $(LINUX_ARCHS); do \
 		if [ "$$arch" = "arm" ]; then \
 			for armver in $(ARM_VARIANTS); do \
 				echo "Building linux/arm/v$$armver..."; \
@@ -62,7 +63,7 @@ linux:
 .PHONY: windows
 windows:
 	@mkdir -p $(OUTDIR)/windows
-	@for arch in $(WINDOWS_ARCHS); do \
+	@set -e; for arch in $(WINDOWS_ARCHS); do \
 		echo "Building windows/$$arch..."; \
 		CGO_ENABLED=0 GOOS=windows GOARCH=$$arch \
 			go build -ldflags="$(LDFLAGS)" -o $(OUTDIR)/windows/$(APP)-$$arch.exe $(CMD); \
@@ -71,16 +72,17 @@ windows:
 
 .PHONY: oldwin
 oldwin:
-	@if [ ! -x "$(GO_LEGACY)" ]; then \
+	@set -e; if [ ! -x "$(GO_LEGACY)" ]; then \
 		echo "go-legacy-win7 not found — downloading $(GO_LEGACY_VER)..."; \
 		mkdir -p "$$(dirname $(GO_LEGACY_DIR))"; \
-		curl -sL "$(GO_LEGACY_URL)" -o /tmp/$(GO_LEGACY_TAR); \
+		curl -fsSL --retry 3 "$(GO_LEGACY_URL)" -o /tmp/$(GO_LEGACY_TAR); \
+		echo "$(GO_LEGACY_SHA256)  /tmp/$(GO_LEGACY_TAR)" | sha256sum -c -; \
 		tar -C "$$(dirname $(GO_LEGACY_DIR))" -xzf /tmp/$(GO_LEGACY_TAR); \
 		rm /tmp/$(GO_LEGACY_TAR); \
 		echo "Installed: $$($(GO_LEGACY) version)"; \
 	fi
 	@mkdir -p $(OUTDIR)/windows
-	@for arch in $(WINDOWS_ARCHS); do \
+	@set -e; for arch in $(WINDOWS_ARCHS); do \
 		echo "Building windows/$$arch (legacy, Win7 compat)..."; \
 		CGO_ENABLED=0 GOOS=windows GOARCH=$$arch \
 			$(GO_LEGACY) build -ldflags="$(LDFLAGS)" -o $(OUTDIR)/windows/$(APP)-$$arch-oldwin.exe $(CMD); \
@@ -93,7 +95,7 @@ oldwin:
 macos: darwin
 darwin:
 	@mkdir -p $(OUTDIR)/darwin
-	@for arch in $(DARWIN_ARCHS); do \
+	@set -e; for arch in $(DARWIN_ARCHS); do \
 		echo "Building darwin/$$arch..."; \
 		CGO_ENABLED=0 GOOS=darwin GOARCH=$$arch \
 			go build -ldflags="$(LDFLAGS)" -o $(OUTDIR)/darwin/$(APP)-$$arch $(CMD); \

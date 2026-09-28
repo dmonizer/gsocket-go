@@ -49,17 +49,17 @@ var (
 
 	// Job Object API — used to ensure all child processes are killed
 	// when the shell is terminated (cmd.exe→powershell.exe chain).
-	_procCreateJobObject         = _kernel32.NewProc("CreateJobObjectW")
-	_procSetInformationJobObject = _kernel32.NewProc("SetInformationJobObject")
+	_procCreateJobObject          = _kernel32.NewProc("CreateJobObjectW")
+	_procSetInformationJobObject  = _kernel32.NewProc("SetInformationJobObject")
 	_procAssignProcessToJobObject = _kernel32.NewProc("AssignProcessToJobObject")
-	_procOpenProcess             = _kernel32.NewProc("OpenProcess")
+	_procOpenProcess              = _kernel32.NewProc("OpenProcess")
 )
 
 // Job Object constants.
 const (
-	_PROCESS_SET_QUOTA            = 0x0100
-	_PROCESS_TERMINATE            = 0x0001
-	_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+	_PROCESS_SET_QUOTA                     = 0x0100
+	_PROCESS_TERMINATE                     = 0x0001
+	_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE    = 0x2000
 	_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 )
 
@@ -412,7 +412,7 @@ func (p *Peer) runWithPipes(shell string) error {
 	}()
 
 	// Shell stdout → Channel.
-	io.Copy(p.channel, stdoutPipe)
+	io.Copy(p.app, stdoutPipe)
 	killProcessTree(cmd.Process, job)
 	p.Close()
 	cmd.Wait()
@@ -533,7 +533,7 @@ func (p *Peer) runWithConPTY(shell string) error {
 		for {
 			n, err := conoutR.Read(buf)
 			if n > 0 {
-				if _, werr := p.channel.Write(buf[:n]); werr != nil {
+				if _, werr := p.app.WriteData(buf[:n]); werr != nil {
 					return
 				}
 				p.mu.Lock()

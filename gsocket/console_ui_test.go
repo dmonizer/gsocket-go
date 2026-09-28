@@ -89,3 +89,36 @@ func TestConsoleSetMethods(t *testing.T) {
 	c.SetComment("")
 	c.SetComment("test comment")
 }
+
+func TestConsoleShellSizeTracksVisibilityAndResize(t *testing.T) {
+	c := NewConsole(bytes.NewReader(nil))
+	c.rows, c.cols = 24, 80
+	c.display = newDisplayTerminal(24, 80)
+	var sizes [][2]int
+	c.OnShellResize = func(rows, cols int) {
+		sizes = append(sizes, [2]int{rows, cols})
+	}
+
+	if rows, cols := c.ShellSize(); rows != 24 || cols != 80 {
+		t.Fatalf("hidden shell size = %dx%d, want 24x80", rows, cols)
+	}
+	c.enterCommandMode() // Ctrl-E + down shows the console.
+	if rows, cols := c.ShellSize(); rows != 20 || cols != 80 {
+		t.Fatalf("visible shell size = %dx%d, want 20x80", rows, cols)
+	}
+	c.exitCommandMode() // Focus change leaves the console visible.
+	if rows, _ := c.ShellSize(); rows != 20 {
+		t.Fatalf("shell size after focus up = %d, want 20", rows)
+	}
+	c.HandleWinch(24, 70)
+	if rows, cols := c.ShellSize(); rows != 20 || cols != 70 {
+		t.Fatalf("resized shell size = %dx%d, want 20x70", rows, cols)
+	}
+	c.toggleVisibility()
+	if rows, cols := c.ShellSize(); rows != 24 || cols != 70 {
+		t.Fatalf("hidden shell size = %dx%d, want 24x70", rows, cols)
+	}
+	if len(sizes) != 2 || sizes[0] != [2]int{20, 80} || sizes[1] != [2]int{24, 70} {
+		t.Fatalf("visibility resize notifications = %v", sizes)
+	}
+}

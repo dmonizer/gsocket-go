@@ -107,7 +107,7 @@ func (p *Peer) runWithPTY(shell string) error {
 	}()
 
 	// Shell stdout → Channel (blocks until shell exits or is killed).
-	io.Copy(p.channel, stdoutPipe)
+	io.Copy(p.app, stdoutPipe)
 	// Ensure shell is dead before we return.
 	if cmd.Process != nil {
 		cmd.Process.Kill()

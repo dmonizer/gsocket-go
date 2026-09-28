@@ -3,7 +3,6 @@
 package gsocket
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -105,15 +104,6 @@ func getTerminalSize(fd int) (rows, cols uint16, err error) {
 	return ws.row, ws.col, nil
 }
 
-// sendWSIZE builds and sends a WSIZE application message with the given
-// terminal dimensions. Matches C's pkt_app_send_wsize().
-func (p *Peer) sendWSIZE(rows, cols uint16) error {
-	data := make([]byte, 4)
-	binary.BigEndian.PutUint16(data[0:2], cols)
-	binary.BigEndian.PutUint16(data[2:4], rows)
-	return p.app.SendMessage(msgWSize, data)
-}
-
 // runWithPTY spawns the given shell in a new PTY and relays data between
 // the PTY master and the encrypted channel.
 func (p *Peer) runWithPTY(shell string) error {
@@ -157,6 +147,9 @@ func (p *Peer) runWithPTY(shell string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start shell: %w", err)
 	}
+	p.mu.Lock()
+	p.shellPID = cmd.Process.Pid
+	p.mu.Unlock()
 
 	// Close our copy of the slave fd — the child owns it now.
 	ptySlave.Close()
@@ -197,7 +190,7 @@ func (p *Peer) runWithPTY(shell string) error {
 	}()
 
 	// PTY master → Channel (shell output → remote).
-	_, err = io.Copy(p.channel, ptyMaster)
+	_, err = io.Copy(p.app, ptyMaster)
 	p.Close()
 	cmd.Wait()
 	return nil
@@ -223,6 +216,9 @@ func (p *Peer) runWithPipes(shell string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start shell: %w", err)
 	}
+	p.mu.Lock()
+	p.shellPID = cmd.Process.Pid
+	p.mu.Unlock()
 
 	// Kill shell when peer is closed (Ctrl-C on server).
 	go func() {
@@ -273,7 +269,7 @@ func (p *Peer) runWithPipes(shell string) error {
 	}()
 
 	// Shell stdout → Channel (blocks until shell exits or is killed).
-	io.Copy(p.channel, stdoutPipe)
+	io.Copy(p.app, stdoutPipe)
 	if cmd.Process != nil {
 		cmd.Process.Kill()
 	}
@@ -297,10 +293,12 @@ func (p *Peer) registerWinchHandler() {
 				if err != nil {
 					continue
 				}
-				_ = p.sendWSIZE(rows, cols)
 				if p.consoleUI != nil {
 					p.consoleUI.HandleWinch(int(rows), int(cols))
+					rowCount, colCount := p.consoleUI.ShellSize()
+					rows, cols = uint16(rowCount), uint16(colCount)
 				}
+				_ = p.sendWSIZE(rows, cols)
 			case <-p.done:
 				signal.Stop(sigCh)
 				return

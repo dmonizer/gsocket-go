@@ -12,6 +12,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,29 +45,31 @@ const (
 // secure channel setup, and bidirectional data transfer with
 // in-band application protocol support.
 type Peer struct {
-	role    PeerRole
-	secret  string
+	role       PeerRole
+	secret     string
 	channel    *SecureChannel
 	gsrn       *GSRNConn
 	gsrnClient *GSRNClient // stored for token reuse (multi-sox)
 	app        *AppProto
+	transfer   *FileTransfer
+	localDir   string // client console directory for PUT and GET
 
 	// GSRN token cache for multi-sox token sharing.
 	gsrnToken    [TokenSize]byte
 	gsrnTokenSet bool
 
 	// Configuration.
-	targetAddr    string
-	listenAddr    string
-	execCmd       string
-	interactive   bool
-	socksServer   bool
-	multiPeer     bool   // accept multiple connections (server + client -p)
-	isUDP         bool   // use UDP transport with length-prefix framing
+	targetAddr     string
+	listenAddr     string
+	execCmd        string
+	interactive    bool
+	socksServer    bool
+	multiPeer      bool   // accept multiple connections (server + client -p)
+	isUDP          bool   // use UDP transport with length-prefix framing
 	socksProxyAddr string // SOCKS5 proxy address for GSRN connections
-	sockWait      bool   // wait for server to become available (-w)
-	quiet         bool   // suppress non-essential output (-q)
-	logger        *log.Logger
+	sockWait       bool   // wait for server to become available (-w)
+	quiet          bool   // suppress non-essential output (-q)
+	logger         *log.Logger
 
 	// Internal state.
 	mu        sync.Mutex
@@ -76,6 +80,7 @@ type Peer struct {
 	// PTY state (server side, Linux only).
 	hasPTY      bool
 	ptyMasterFd uintptr
+	shellPID    int
 
 	// Console UI state (client side, -C flag).
 	consoleUI *Console
@@ -330,6 +335,9 @@ func (p *Peer) finishHandshake(gsrn *GSRNConn, isServer bool) error {
 	p.gsrn = gsrn
 	p.app = NewAppProto(channel)
 	p.running = true
+	if p.interactive {
+		p.transfer = NewFileTransfer(p.app, p.role == RoleServer, p.transferCWD, p.transferReport)
+	}
 
 	// Wire up application protocol callbacks. These handle in-band
 	// signalling (window resize, keepalive, logs, status) that is
@@ -442,7 +450,7 @@ func (p *Peer) runRelay() error {
 		for {
 			n, err := reader.Read(buf)
 			if n > 0 {
-				if _, werr := p.channel.Write(buf[:n]); werr != nil {
+				if _, werr := p.app.WriteData(buf[:n]); werr != nil {
 					return
 				}
 				p.mu.Lock()
@@ -541,7 +549,7 @@ func (p *Peer) runExecCmd() error {
 	}()
 
 	// Command stdout → Channel (blocks until command exits or channel breaks).
-	io.Copy(p.channel, stdoutPipe)
+	io.Copy(p.app, stdoutPipe)
 	p.Close()
 	cmd.Wait()
 	return nil
@@ -587,6 +595,9 @@ func (p *Peer) runClientInteractive() error {
 	if p.consoleUI != nil {
 		p.consoleUI.stdoutMu = stdoutMu
 		p.consoleUI.OnCommand = p.handleConsoleCommand
+		p.consoleUI.OnShellResize = func(rows, cols int) {
+			_ = p.sendWSIZE(uint16(rows), uint16(cols))
+		}
 		p.consoleUI.Init()
 		defer p.consoleUI.Close()
 		go p.startBPSTicker()
@@ -617,6 +628,14 @@ func (p *Peer) runClientInteractive() error {
 			display.Write(plaintext)
 		}
 	}
+	// The server's PTY starts without the client's dimensions. Send them
+	// after its first output, when the PTY is ready to receive WSIZE.
+	if rows, cols, sizeErr := term.GetSize(fd); sizeErr == nil {
+		if p.consoleUI != nil {
+			rows, cols = p.consoleUI.ShellSize()
+		}
+		_ = p.sendWSIZE(uint16(rows), uint16(cols))
+	}
 
 	// Stdin → Channel.
 	go func() {
@@ -625,7 +644,7 @@ func (p *Peer) runClientInteractive() error {
 		for {
 			n, err := stdinReader.Read(buf)
 			if n > 0 {
-				if _, werr := p.channel.Write(buf[:n]); werr != nil {
+				if _, werr := p.app.WriteData(buf[:n]); werr != nil {
 					return
 				}
 				p.mu.Lock()
@@ -663,8 +682,30 @@ func (p *Peer) runClientInteractive() error {
 	}
 }
 
+// sendWSIZE sends the shell's usable dimensions to the remote PTY.
+func (p *Peer) sendWSIZE(rows, cols uint16) error {
+	data := make([]byte, 4)
+	binary.BigEndian.PutUint16(data[0:2], cols)
+	binary.BigEndian.PutUint16(data[2:4], rows)
+	return p.app.SendMessage(msgWSize, data)
+}
+
 // handleConsoleCommand dispatches console commands typed after Ctrl-E + down arrow.
 func (p *Peer) handleConsoleCommand(cmd string) {
+	if p.transfer != nil {
+		if strings.HasPrefix(cmd, "put ") {
+			if err := p.transfer.Put(strings.TrimSpace(cmd[4:])); err != nil {
+				p.consoleUI.SetComment("put: " + err.Error())
+			}
+			return
+		}
+		if strings.HasPrefix(cmd, "get ") {
+			if err := p.transfer.Get(strings.TrimSpace(cmd[4:])); err != nil {
+				p.consoleUI.SetComment("get: " + err.Error())
+			}
+			return
+		}
+	}
 	switch cmd {
 	case "ping":
 		// Send an immediate PING and set comment until PONG arrives.
@@ -694,10 +735,63 @@ func (p *Peer) handleConsoleCommand(cmd string) {
 		p.consoleUI.SetComment("IDS: not implemented")
 	case "clear":
 		p.consoleUI.SetComment("")
+	case "lpwd":
+		p.consoleUI.SetComment(p.transferCWD())
+	case "help":
+		p.consoleUI.SetComment("put <path>, get <pattern>, lcd <dir>, lpwd, ping, pwd")
 	default:
-		if cmd != "" {
+		if strings.HasPrefix(cmd, "lcd ") {
+			path := strings.TrimSpace(cmd[4:])
+			path = os.ExpandEnv(path)
+			if path == "~" || strings.HasPrefix(path, "~/") {
+				if home, err := os.UserHomeDir(); err == nil {
+					path = home + strings.TrimPrefix(path, "~")
+				}
+			}
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(p.transferCWD(), path)
+			}
+			info, err := os.Stat(path)
+			if err != nil || !info.IsDir() {
+				p.consoleUI.SetComment("lcd: directory not found")
+				return
+			}
+			path = filepath.Clean(path)
+			p.mu.Lock()
+			p.localDir = path
+			p.mu.Unlock()
+			p.consoleUI.SetComment(path)
+		} else if cmd != "" {
 			p.consoleUI.SetComment("unknown: " + cmd)
 		}
+	}
+}
+
+func (p *Peer) transferCWD() string {
+	p.mu.Lock()
+	pid := p.shellPID
+	localDir := p.localDir
+	p.mu.Unlock()
+	if p.role == RoleClient && localDir != "" {
+		return localDir
+	}
+	if p.role == RoleServer && pid > 0 {
+		if path, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid)); err == nil {
+			return path
+		}
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
+}
+
+func (p *Peer) transferReport(message string) {
+	if p.role == RoleClient && p.consoleUI != nil {
+		p.consoleUI.SetComment(message)
+	} else {
+		p.logger.Printf("file transfer: %s", message)
 	}
 }
 
@@ -952,6 +1046,9 @@ func (p *Peer) GSClient() *GSRNClient {
 // Close shuts down the peer and releases resources.
 func (p *Peer) Close() error {
 	p.closeOnce.Do(func() {
+		if p.transfer != nil {
+			p.transfer.Close()
+		}
 		p.mu.Lock()
 		p.running = false
 		p.mu.Unlock()
@@ -1001,8 +1098,8 @@ func (p *Peer) wireAppCallbacks() {
 		// Send PONG with load/idle/user info.
 		// Matches C's pkt_app_cb_ping() → pkt_app_send_pong().
 		pong := AppPong{
-			Load:  0,
-			Idle:  0,
+			Load:   0,
+			Idle:   0,
 			NUsers: 1,
 		}
 		copy(pong.User[:], "gsocket")
@@ -1064,13 +1161,13 @@ func (p *Peer) wireAppCallbacks() {
 			p.logger.Printf("Server has no PTY — enabling line editing")
 			p.mu.Lock()
 			p.hasPTY = false
-				if p.consoleReader != nil {
-					ed := NewLineEditor(os.Stdout, p.stdoutMu)
-					p.consoleReader.SetLineMode(true, ed)
-				}
-				if p.consoleUI != nil {
-					p.consoleUI.EnableLineEditing(p.stdoutMu)
-				}
+			if p.consoleReader != nil {
+				ed := NewLineEditor(os.Stdout, p.stdoutMu)
+				p.consoleReader.SetLineMode(true, ed)
+			}
+			if p.consoleUI != nil {
+				p.consoleUI.EnableLineEditing(p.stdoutMu)
+			}
 			p.mu.Unlock()
 		}
 		return nil

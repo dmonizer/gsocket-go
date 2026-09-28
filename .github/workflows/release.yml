@@ -1,0 +1,75 @@
+name: Publish main builds
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-main-builds
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Test and vet
+        run: |
+          go test ./...
+          go vet ./...
+
+      - name: Build all targets
+        run: make all
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          for platform in linux windows darwin; do
+            for path in build/"$platform"/gs-netcat-*; do
+              test -f "$path"
+              name="${path##*/}"
+              cp "$path" "release/gs-netcat-${platform}-${name#gs-netcat-}"
+            done
+          done
+
+          count=$(find release -maxdepth 1 -type f -name 'gs-netcat-*' | wc -l)
+          test "$count" -eq 11
+          (cd release && sha256sum gs-netcat-* > SHA256SUMS)
+
+      - name: Publish commit release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="main-${GITHUB_SHA}"
+          title="main ${GITHUB_SHA:0:12}"
+          notes="Automated builds for commit ${GITHUB_SHA} on main. SHA256SUMS contains checksums for all 11 binaries."
+
+          if state=$(gh release view "$tag" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            if [[ "$state" == true ]]; then
+              gh release upload "$tag" release/* --clobber
+              gh release edit "$tag" --draft=false
+            else
+              echo "Release $tag is already published."
+            fi
+          else
+            gh release create "$tag" release/* \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes "$notes" \
+              --prerelease \
+              --latest=false
+          fi

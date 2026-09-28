@@ -18,18 +18,21 @@ const (
 	msgStatus = 33 // status message (max 64 bytes)
 
 	// Channel messages (variable size, type >= 128).
-	chnFTData    = 131 // file transfer data
-	chnFTError   = 132 // file transfer error
-	chnFTSwitch  = 133 // file transfer switch (direction change)
-	chnFTListRpl = 134 // file transfer list reply
+	chnFTPut      = 128 // upload offer
+	chnFTAccept   = 129 // upload accepted
+	chnFTListReq  = 130 // download glob request
+	chnFTData     = 131 // file transfer data
+	chnFTError    = 132 // file transfer error or completion
+	chnFTSwitch   = 133 // select active file and offset
+	chnFTListRpl  = 134 // file transfer list reply
 	chnFTDownload = 135 // file transfer download request
-	chnPWD       = 136 // working directory reply
+	chnPWD        = 136 // working directory reply
 
 	// Channel types (offset from message types).
 	chnOffset = 128
 
 	// Escape byte for in-band signaling.
-	escapeByte = 0xfe
+	escapeByte = 0xfb // C beta GS_PKT_ESC
 
 	// Packet sizes per message type.
 	msgSizeSmall  = 4
@@ -44,17 +47,17 @@ const (
 
 // AppPing is an application-level keepalive ping.
 type AppPing struct {
-	Flags  uint8
-	_      [3]uint8
-	User   [12]uint8
+	Flags uint8
+	_     [3]uint8
+	User  [12]uint8
 }
 
 // AppPong is an application-level keepalive pong.
 type AppPong struct {
-	Load  uint16
-	Idle  uint16
+	Load   uint16
+	Idle   uint16
 	NUsers uint8
-	User  [11]uint8
+	User   [11]uint8
 }
 
 // AppLog is a log message sent from server to client.
@@ -117,7 +120,7 @@ type AppProto struct {
 	escType      uint8  // type of current escape sequence
 	inband       []byte // accumulated in-band data
 	inbandLen    int
-	gotChnLen    bool   // received the 2-byte channel length
+	gotChnLen    bool // received the 2-byte channel length
 	callbacks    map[uint8]MessageCallback
 }
 
@@ -176,6 +179,28 @@ func (ap *AppProto) SendChannel(chn uint8, data []byte) error {
 	_, err := ap.rw.Write(pkt)
 	return err
 }
+
+// WriteData escapes literal control bytes in ordinary stream data, matching
+// C's GS_PKT_encode. SendMessage and SendChannel write framed control data.
+func (ap *AppProto) WriteData(data []byte) (int, error) {
+	escaped := make([]byte, 0, len(data))
+	for _, b := range data {
+		escaped = append(escaped, b)
+		if b == escapeByte {
+			escaped = append(escaped, b)
+		}
+	}
+	n, err := ap.rw.Write(escaped)
+	if err != nil {
+		return 0, err
+	}
+	if n != len(escaped) {
+		return 0, io.ErrShortWrite
+	}
+	return len(data), nil
+}
+
+func (ap *AppProto) Write(data []byte) (int, error) { return ap.WriteData(data) }
 
 // Decode processes incoming data and extracts application messages.
 // It filters out escape sequences, returning only the plaintext data

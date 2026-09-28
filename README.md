@@ -6,7 +6,7 @@ Pure Go implementation of the [Global Socket Toolkit](https://github.com/hackers
 
 ## Features
 
-- **End-to-end encrypted** — ECDH-X25519 key exchange + AES-256-GCM
+- **End-to-end encrypted** — CPace over X25519 + AES-256-GCM
 - **Mutual authentication** — both peers prove knowledge of the shared secret via HMAC
 - **Forward secrecy** — ephemeral keys per session
 - **GSRN compatible** — uses the same Global Socket Relay Network (gsocket.org)
@@ -19,7 +19,7 @@ Pure Go implementation of the [Global Socket Toolkit](https://github.com/hackers
 
 | | C (gsocket) | Go (gsocket-go) |
 |---|---|---|
-| Encryption | TLS-SRP (RFC 5054) + AES-256-CBC | ECDH-X25519 + AES-256-GCM |
+| Encryption | TLS-SRP (RFC 5054) + AES-256-CBC | CPace (RFC 9383) over X25519 + AES-256-GCM |
 | Key exchange | SRP with 4096-bit prime | Ephemeral X25519 + HKDF |
 | Build | autotools, OpenSSL dep | `go build`, zero C deps |
 | Windows | Cygwin only | Native (no DLLs needed) |
@@ -28,6 +28,12 @@ Pure Go implementation of the [Global Socket Toolkit](https://github.com/hackers
 Go and C clients can coexist on the same GSRN but cannot talk directly to each other — they use different encryption protocols on top of the same relay.
 
 ## Installation
+
+### Prebuilt binaries
+
+Every push to `main` publishes a GitHub prerelease named `main-<commit SHA>`
+with all 11 Makefile targets and a `SHA256SUMS` file. Asset names include the
+platform, architecture, and `oldwin` suffix for Windows 7 compatible builds.
 
 ### From source
 
@@ -62,6 +68,15 @@ gs-netcat -l -i -s MySecret
 ```bash
 gs-netcat -i -s MySecret
 ```
+
+Press `Ctrl-E` then `↓` to open the console. Use `put <path>` to upload and
+`get <pattern>` to download; `lcd <dir>` changes the client's transfer
+directory and `lpwd` shows it. `Ctrl-E` then `↑` returns focus to the shell.
+Transfers support wildcards, recursive directories, resume, and C's `/./`
+path marker (for example, `put /tmp/./reports` creates `reports` remotely).
+On Unix, transfer patterns also accept C-style command substitution such as
+`$(find ...)`. A remote `get` request evaluates its pattern on the server, so
+only connect to peers you trust to run commands as the server user.
 
 ### TCP forwarding
 
@@ -198,7 +213,7 @@ BSD 2-Clause — same as the original gsocket project.
 
 ## Security
 
-This is a community port. The cryptographic design replaces TLS-SRP with ECDH-X25519 + HKDF + AES-256-GCM. Both approaches provide mutual authentication, forward secrecy, and data confidentiality. If you discover a vulnerability, please report it responsibly.
+This is a community port. The cryptographic design replaces TLS-SRP with CPace over X25519 and AES-256-GCM. Both approaches provide mutual authentication, forward secrecy, and data confidentiality. If you discover a vulnerability, please report it responsibly.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 

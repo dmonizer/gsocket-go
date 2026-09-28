@@ -12,6 +12,26 @@ type testConn struct {
 	readBuf *bytes.Buffer
 }
 
+func TestAppProtoWriteDataEscapesLiteralControlByte(t *testing.T) {
+	if escapeByte != 0xfb {
+		t.Fatalf("escape byte = 0x%02x, C beta requires 0xfb", escapeByte)
+	}
+	var wire bytes.Buffer
+	sender := NewAppProto(&wire)
+	plain := []byte{'a', escapeByte, 'b'}
+	if n, err := sender.WriteData(plain); err != nil || n != len(plain) {
+		t.Fatalf("WriteData = %d, %v", n, err)
+	}
+	if want := []byte{'a', escapeByte, escapeByte, 'b'}; !bytes.Equal(wire.Bytes(), want) {
+		t.Fatalf("wire data = %x, want %x", wire.Bytes(), want)
+	}
+	receiver := NewAppProto(&bytes.Buffer{})
+	got, err := receiver.Decode(wire.Bytes())
+	if err != nil || !bytes.Equal(got, plain) {
+		t.Fatalf("decoded data = %x, %v", got, err)
+	}
+}
+
 func newTestConn() *testConn {
 	return &testConn{
 		Buffer:  new(bytes.Buffer),
@@ -119,7 +139,7 @@ func TestAppProtoChannelMessage(t *testing.T) {
 	payload := []byte("file transfer data here")
 	input := make([]byte, 4+len(payload))
 	input[0] = escapeByte
-	input[1] = chnFTData          // channel type (>= 128)
+	input[1] = chnFTData               // channel type (>= 128)
 	input[2] = byte(len(payload) >> 8) // length high byte
 	input[3] = byte(len(payload))      // length low byte
 	copy(input[4:], payload)
@@ -185,7 +205,7 @@ func TestAppProtoMixedData(t *testing.T) {
 
 func TestAppProtoMsgSize(t *testing.T) {
 	tests := []struct {
-		msgType uint8
+		msgType  uint8
 		wantSize int
 	}{
 		{0, -1},
@@ -271,7 +291,7 @@ func TestAppProtoWriteMessage(t *testing.T) {
 		t.Errorf("encoded size = %d, want 18", len(result))
 	}
 	if result[0] != escapeByte {
-		t.Errorf("first byte = 0x%02x, want 0xfe", result[0])
+		t.Errorf("first byte = 0x%02x, want 0xfb", result[0])
 	}
 	if result[1] != msgPing {
 		t.Errorf("type byte = %d, want %d", result[1], msgPing)
@@ -292,7 +312,7 @@ func TestAppProtoWriteChannelMessage(t *testing.T) {
 		t.Errorf("encoded size = %d, want %d", len(result), 4+len(payload))
 	}
 	if result[0] != escapeByte {
-		t.Errorf("first byte = 0x%02x, want 0xfe", result[0])
+		t.Errorf("first byte = 0x%02x, want 0xfb", result[0])
 	}
 	if result[1] != chnFTData {
 		t.Errorf("type byte = %d, want %d", result[1], chnFTData)

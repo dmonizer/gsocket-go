@@ -1,7 +1,7 @@
 # gsocket-go vs C gsocket — Feature Completeness Map
 
-> Last updated: 2026-07-05 — audited against C **beta** channel
-> (branch `beta` at `2cdac14`, https://github.com/hackerschoice/gsocket)
+> Last updated: 2026-09-25 — file transfer audited against C **beta** channel
+> (branch `beta` at `c58818d`, https://github.com/hackerschoice/gsocket)
 >
 > **Note:** The C `beta` branch is the stable/production channel. The `master`
 > branch has ~755 additional commits of in-development work. This audit compares
@@ -9,15 +9,16 @@
 
 ## Summary
 
-The Go implementation covers the **core happy path** of the C beta codebase
-(~73% of features). It handles the fundamental use case — two peers connecting
+The Go implementation covers most of the C beta codebase's core features
+(~79% by the subsystem estimates below). It handles two peers connecting
 interactively over GSRN — plus SOCKS5 proxying, multi-peer concurrency, UDP
 transport, daemon mode (Unix + Windows service), watchdog auto-restart, process
 title (`-T`), SIGWINCH terminal resize, NOPTY fallback, app-level PING/PONG
 keepalive, LOG/STATUS in-band messaging, Ctrl-E console escape handling, a
-basic console UI with status bar and command line (`-C`), quiet mode (`-q`),
-and log-to-file (`-L`). Still missing: file transfer engine, full console
-commands, IDS, full statistics formatting, and several minor CLI flags.
+console UI with status bar and command line (`-i`), quiet mode (`-q`),
+and log-to-file (`-L`). File transfer now implements the C beta channel packet
+layouts and PUT/GET state machine. Still missing: full console commands, IDS,
+full statistics formatting, and several minor CLI flags.
 
 ---
 
@@ -54,8 +55,8 @@ commands, IDS, full statistics formatting, and several minor CLI flags.
 
 | Feature | C | Go | Notes |
 |---|---|---|---|
-| Encryption protocol | TLS-SRP (RFC 5054) + AES-256-CBC | ECDH-X25519 + HKDF + AES-256-GCM | |
-| Mutual authentication | ✅ (SRP) | ✅ (HMAC) | |
+| Encryption protocol | TLS-SRP (RFC 5054) + AES-256-CBC | CPace (RFC 9383) over X25519 + AES-256-GCM | |
+| Mutual authentication | ✅ (SRP) | ✅ (CPace key confirmation) | |
 | Forward secrecy | ✅ | ✅ | Ephemeral keys per session |
 | C ↔ Go interoperability | — | ❌ | By design — different crypto on same relay |
 | Disable encryption (C `-C` flag) | ✅ | ❌ | C beta `-C` = `GS_OPT_NO_ENCRYPTION`; Go has no equivalent |
@@ -64,10 +65,9 @@ commands, IDS, full statistics formatting, and several minor CLI flags.
 to each other. From a security standpoint the Go protocol is actually stronger
 (modern AEAD cipher, no legacy SRP dependency).
 
-**Important:** In the C beta branch, `-C` means **"Disable encryption"** — not
-"Console status bar" as sometimes assumed. The console in C is auto-enabled
-with interactive mode (`-i`) via `Ctrl-E+c`. Go uses `-C` to enable its
-console UI (different semantics, same flag letter).
+**Important:** In the C beta branch, `-C` means **"Disable encryption"**.
+The console in both implementations is available with interactive mode (`-i`)
+and toggled with `Ctrl-E+c`. Go does not implement the C `-C` flag.
 
 ---
 
@@ -96,7 +96,7 @@ console UI (different semantics, same flag letter).
 | `-v` | ✅ | ✅ | Verbose output |
 | `-g` | ✅ | ✅ | Generate a random secret and exit |
 | `-L <file>` | ✅ | ✅ | Log to file |
-| `-C` | ✅ | ✅ | C: **disable encryption** (`GS_OPT_NO_ENCRYPTION`); Go: enable console UI + commands |
+| `-C` | ✅ | ❌ | C: **disable encryption** (`GS_OPT_NO_ENCRYPTION`); Go has no equivalent |
 | `-P <path>` | ✅ | ❌ | Write PID file |
 | `-B <min>` | ✅ | ❌ | Check GSRN every `<min>` minutes, sleep otherwise (needs `-l`) |
 | `-I` | ✅ | ❌ | Ignore EOF on stdin (keep connection open) |
@@ -125,26 +125,24 @@ console UI (different semantics, same flag letter).
 | NOPTY fallback — notifies client when PTY fails | ✅ | ✅ | Server sends STATUS(NOPTY); client switches to pipe mode |
 | Windows ConPTY (pseudo-console) | ❌ | ✅ | Go-only: `--conpty` flag for Win10+ native pty support |
 | Ctrl-E console command system | ✅ | ✅ | Escape handling works; `ConsoleReader` implements C's full state machine |
-| **Console status bar** — load / ping / BPS / duration / peer count | ✅ | ⚠️ | Go: basic status bar via `-C`; missing file-transfer % |
-| **Console commands** — `ping`, `pwd`, `ft` (put/get), `log`, `ids` | ✅ | ⚠️ | Go: command line dispatches to peer; PING/PONG/LOG wired; `pwd`/`ids` types defined but handlers not registered; no `ft` (put/get) |
-| **Local console commands** — `lpwd`, `lcd`, `lmkdir`, `lls`, `clear`, `quit` | ✅ | ❌ | Go console has no local file/dir commands |
+| **Console status bar** — load / ping / BPS / duration / peer count | ✅ | ⚠️ | Go: status bar with transfer progress comment; some C statistics remain unavailable |
+| **Console commands** — `ping`, `pwd`, `put`, `get`, `log`, `ids` | ✅ | ⚠️ | Go: `put`/`get`, `ping`, `pwd` and LOG work; `ids` and `log` console commands remain incomplete |
+| **Local console commands** — `lpwd`, `lcd`, `lmkdir`, `lls`, `clear`, `quit` | ✅ | ⚠️ | Go: `lpwd`, `lcd`, and `clear` work; `lmkdir`, `lls`, `quit` remain incomplete |
 | `CONSOLE_check_esc()` — intercept escape sequences from stdin | ✅ | ✅ | `ConsoleReader` in `console.go` implements the full C state machine |
-| Console toggle via Ctrl-E+c (C) / `-C` flag (Go) | ✅ | ✅ | C: auto-enabled with `-i`; Go: gated behind `-C` flag |
+| Console toggle via Ctrl-E+c | ✅ | ✅ | Available with `-i` in both implementations |
 
-**Key difference:** In the C beta channel, the console is **always available**
-with `-i` — toggled via `Ctrl-E+c`. Go gates the console behind the explicit
-`-C` flag and enters console mode automatically when the flag is set.
+The console is available with `-i` and toggled via `Ctrl-E+c` in both versions.
 
 ---
 
 ## 5. Application Protocol (In-Band Signalling)
 
-Both implementations use `0xFE` (escape byte) to multiplex control messages
+Both implementations use `0xFB` (escape byte) to multiplex control messages
 within the encrypted data stream.
 
 | Feature | C | Go | Notes |
 |---|---|---|---|
-| Escape-byte encoding (`0xFE`) + literal escape (`0xFE 0xFE`) | ✅ | ✅ | |
+| Escape-byte encoding (`0xFB`) + literal escape (`0xFB 0xFB`) | ✅ | ✅ | |
 | Fixed-size messages — size tiered by type number | ✅ | ✅ | `MsgSize()` function matches C |
 | Channel messages — variable size with 2-byte length prefix | ✅ | ✅ | |
 | Callback registry (`OnMessage` / `OnChannel`) | ✅ | ✅ | |
@@ -154,8 +152,8 @@ within the encrypted data stream.
 | **IDS** — subscribe to intrusion notifications | ✅ | ⚠️ | Type & struct defined; no handler registered |
 | **LOG** — server→client log messages | ✅ | ✅ | Client prints with type prefix ([ALERT], [NOTICE], [INFO]) |
 | **STATUS** — status messages (e.g. NOPTY) | ✅ | ✅ | Client handles NOPTY → switches to pipe mode |
-| **PWD** — working directory request/reply | ✅ | ⚠️ | Types & structs defined; no handlers registered |
-| **File transfer channels** — PUT/ACCEPT/DATA/SWITCH/ERROR/LIST/DL | ✅ | ❌ | Channel types defined; no engine or handlers |
+| **PWD** — working directory request/reply | ✅ | ✅ | Go replies with the remote shell's current directory |
+| **File transfer channels** — PUT/ACCEPT/DATA/SWITCH/ERROR/LIST/DL | ✅ | ✅ | C beta channel IDs, packet fields, and handlers implemented |
 
 **Key gap:** The Go `AppProto.Decode()` successfully parses and strips all
 in-band escape sequences, and callbacks for the major message types are now
@@ -165,28 +163,38 @@ wired up in `Peer.wireAppCallbacks()`. What's still missing:
 - App-layer keepalive pings/pongs → ✅ client sends PING every 30s; server replies with PONG
 - Server→client log messages → ✅ printed with type prefix ([ALERT], [NOTICE], [INFO])
 - NOPTY status → ✅ client switches to pipe mode on receiving STATUS(NOPTY)
-- File transfer channels → ❌ channel types defined but no engine or handlers
-- PWD/IDS → ❌ types and structs defined; no handlers registered
+- File transfer channels → ✅ PUT/GET/LIST, resume, and completion handlers
+- PWD → ✅ request/reply handlers wired; IDS → ❌ no handler registered
 
 ---
 
 ## 6. File Transfer
 
-| Feature | C | Go |
-|---|---|---|
-| File transfer engine — PUT (upload), GET (download), LIST | ✅ | ❌ |
-| Globbing support (`*`, `?`, `{a,b}`) | ✅ | ❌ |
-| Resume support — SWITCH to offset within file | ✅ | ❌ |
-| Speed calculation & per-file stats | ✅ | ❌ |
-| Error reporting — per-file status codes | ✅ | ❌ |
-| Console integration — progress display | ✅ | ❌ |
-| Accept/refuse individual files | ✅ | ❌ |
-| Multi-file transfer with summary | ✅ | ❌ |
+| Feature | C | Go | Notes |
+|---|---|---|---|
+| File transfer engine — PUT (upload), GET (download), LIST | ✅ | ✅ | |
+| Globbing support (`*`, `?`, `{a,b}`) | ✅ | ✅ | |
+| Resume support — SWITCH to offset within file | ✅ | ✅ | |
+| Speed calculation & per-file stats | ✅ | ✅ | |
+| Error reporting — per-file status codes | ✅ | ✅ | |
+| Console integration — progress display | ✅ | ⚠️ | Go shows percent and completion in its status line; no scrolling transfer log |
+| Accept/refuse individual files | ✅ | ✅ | Automatic accept or refusal based on filesystem checks |
+| Multi-file transfer with summary | ✅ | ✅ | Cumulative success, error, byte, and duration statistics |
+| Command substitution in patterns | ✅ | ⚠️ | Unix: POSIX shell evaluation; Windows: unavailable |
 
-The C file transfer is a full subsystem (~2,076 lines `filetransfer.c` +
-~360 lines `filetransfer_mgr.c` + ~406 lines `globbing.c`). The Go code
-defines the channel type constants (`chnFTData`, `chnFTError`, etc.) but
-implements nothing beyond the escape-sequence parser.
+Go uses the C beta channel IDs and packet layouts, including its 40-byte LIST
+reply header, and supports recursive directories, `/./` destination naming,
+file permissions and modification times, and resume by offset. The file transfer
+tests exercise both ends of the in-band parser without a relay. **C and Go still
+cannot form an encrypted session together**, so live cross-implementation
+transfer is pending a compatible crypto layer.
+
+C's `wordexp` executes command substitutions such as `$(find ...)` in file
+patterns. Go accepts these on Unix by evaluating the pattern in `sh`; ordinary
+patterns use Go's parser. A remote `get` request can therefore execute shell
+commands as the server user. Go rejects shell control operators outside the
+substitution and limits expansion time and output size. POSIX shell expansion
+may differ from libc `wordexp` in edge cases.
 
 ---
 
@@ -359,10 +367,10 @@ integration with the `select()` loop for timing.
 | GSRN wire protocol | **85%** | Core works; missing multi-sox and auto-reconnect |
 | Address derivation | **100%** | Identical to C |
 | Crypto | **100%*** | Different but equivalent security; not wire-compatible with C |
-| CLI flags | **80%** | All major flags done: `-s`, `-l`, `-i`, `-e`, `-d`, `-p`, `-D`, `-W`, `-S`, `-u`, `-T`, `-w`, `-v`, `-g`, `-k`, `-t`, `-q`, `-L`, `--tor`, `-C`, `--conpty`; missing `-r`, `-m`, `-P`, `-B`, `-I`, `-A`, `-a`, `-N` |
-| Interactive shell | **85%** | PTY + resize + NOPTY + ConPTY + Ctrl-E escape + console UI with status bar + command dispatch; missing full console commands (ft/ids), local file commands |
-| App protocol parser | **85%** | Parsing works; WSIZE/PING/PONG/LOG/STATUS callbacks wired; PWD/IDS still unhandled |
-| File transfer | **5%** | Only channel-type constants defined |
+| CLI flags | **80%** | Most common flags done: `-s`, `-l`, `-i`, `-e`, `-d`, `-p`, `-D`, `-W`, `-S`, `-u`, `-T`, `-w`, `-v`, `-g`, `-k`, `-t`, `-q`, `-L`, `--tor`, `--conpty`; missing C `-C`, `-r`, `-m`, `-P`, `-B`, `-I`, `-A`, `-a`, `-N` |
+| Interactive shell | **85%** | PTY + resize + NOPTY + ConPTY + Ctrl-E escape + console UI with transfer commands; some local and IDS commands remain |
+| App protocol parser | **90%** | WSIZE/PING/PONG/LOG/STATUS/PWD and file transfer callbacks wired; IDS unhandled |
+| File transfer | **95%** | C beta channel packets and PUT/GET/LIST/resume tested against the C transfer engine; Unix command substitution works; some console presentation and Windows shell expansion remain |
 | SOCKS5 | **100%** | Client + server; env vars; TOR |
 | Multi-peer | **70%** | Goroutine-per-session; missing ID tracking, single-shot |
 | Daemon / watchdog | **75%** | `-D` + `-W` with backoff; Windows service with stealth naming; missing PID file, internal mode |
@@ -370,9 +378,9 @@ integration with the `select()` loop for timing.
 | UDP | **80%** | Framing + forwarding; missing idle timeout |
 | IDS | **0%** | Not implemented |
 | Statistics / logging | **45%** | Byte counters, console BPS display, `-q`/`-L` flags; missing formatting, rates, disconnect summary |
-| Tests | **100%** | 48+ tests covering protocol, crypto, appproto, SOCKS5, console reader, console UI, and shell integration |
+| Tests | **100%** | Go protocol and transfer tests, plus opt-in direct tests against C beta's transfer engine |
 | Portability | **100%** | Pure Go → Linux, macOS, Windows native |
-| **OVERALL** | **~73%** | Core + SOCKS5 + multi-peer + UDP + daemon + watchdog + Windows service + interactive shell + console UI + all major CLI flags complete |
+| **OVERALL** | **~79%** | Includes the C beta file transfer protocol and interactive PUT/GET commands; encrypted C/Go sessions still require a shared crypto protocol |
 
 ---
 
@@ -387,16 +395,17 @@ integration with the `select()` loop for timing.
 | ~~Ctrl-E console escape handling~~ | ~~Small~~ ✅ Done |
 | ~~CLI flags: -k, -t, -q, -L~~ | ~~Small~~ ✅ Done |
 | ~~Console system (status bar, command line, BPS display)~~ | ~~Medium~~ ✅ Done |
-| PWD/IDS message handlers | Small |
+| IDS message handlers | Small |
 | Remaining CLI flags (`-r`, `-m`, `-P`, `-B`, `-I`, `-A`, `-a`, `-N`) | Small |
 | Console local commands (`lpwd`, `lcd`, `lmkdir`, `lls`, `clear`, `quit`) | Small–Medium |
-| Console remote commands (`ft` put/get wiring) | Medium (depends on file transfer) |
+| ~~Console remote commands (`put`/`get` wiring)~~ | ~~Medium~~ ✅ Done |
 | Multi-sox backlog for faster re-accept | Medium |
 | Auto-reconnect & DNS re-resolution | Medium |
 | Human-readable byte/duration formatting | Small |
 | Statistics formatting & disconnect summary | Medium |
 | Full logging (log levels `-vv`/`-vvv`, `GS_LOG_TSP`, `gs_func_log`) | Small–Medium |
-| File transfer engine (PUT/GET/LIST/globbing/resume) | **Large** |
+| ~~File transfer engine (PUT/GET/LIST/globbing/resume)~~ | ~~Large~~ ✅ Done |
+| ~~C command substitution in transfer patterns on Unix~~ | ~~Medium~~ ✅ Done |
 | IDS subsystem (utmp monitoring + peer notifications) | Medium |
 | Event manager (general priority queue) | Medium |
 | PID file (`-P`), internal mode, auth-cookie protocol | Medium |
