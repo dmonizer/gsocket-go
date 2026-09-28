@@ -2,7 +2,7 @@
 
 Pure Go implementation of the [Global Socket Toolkit](https://github.com/hackerschoice/gsocket) — connect TCP pipes between peers behind NAT/firewalls using only a shared secret.
 
-**Go-native rewrite.** Single binary. No CGo. No MinGW. Runs on **Windows**, Linux, and macOS.
+**Go-native rewrite.** Runs on **Windows**, Linux, and macOS.
 
 ## Features
 
