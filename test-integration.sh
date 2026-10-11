@@ -10,7 +10,9 @@ CLIENT_ERR=$(mktemp)
 TIMEOUT=30
 
 cleanup() {
-    kill %1 2>/dev/null || true
+    if [[ -n "${LISTENER_PID:-}" ]]; then
+        kill "$LISTENER_PID" 2>/dev/null || true
+    fi
     wait 2>/dev/null || true
     rm -f "$OUTFILE" "$ERRFILE" "$CLIENT_ERR"
 }
@@ -28,16 +30,10 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-# Start listener in background with stdin from /dev/null.
-# The listener's stdin goroutine gets EOF, exits, and RunShell returns.
-# But we also need the listener to STAY ALIVE long enough for the client.
-# So we use a trick: start a sleep in a subshell to keep stdout open.
-#
-# Actually, simpler: redirect stdin but don't worry — the channel→stdout
-# goroutine reads data and writes to stdout BEFORE the stdin goroutine's
-# defer p.Close() tears down the connection. The TCP data is already
-# buffered in the kernel.
-"$BINARY" -s "$SECRET" -l < /dev/null > "$OUTFILE" 2> "$ERRFILE" &
+# Verbose mode is required because the registration wait below looks for
+# the "Waiting for client" log message. Keep stdin open for the listener so
+# its stdin relay does not close the peer immediately after connection.
+"$BINARY" -v -s "$SECRET" -l < <(tail -f /dev/null) > "$OUTFILE" 2> "$ERRFILE" &
 LISTENER_PID=$!
 echo "Listener started (PID=$LISTENER_PID)"
 
