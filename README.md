@@ -15,8 +15,8 @@ Pure Go implementation of the [Global Socket Toolkit](https://github.com/hackers
 - **SOCKS5 / TOR support** — route through TOR for anonymity
 - **Single binary** — `go build` produces one static executable
 
-**NB!** - this is **NOT** on-wire compatible with original C version due to different cryptographic algorithms! eg. You will have to use gsocket-go to connect gsocket-go, you cannot mix original gsocket with gsocket-go.
-(At least until @@SkyperTHC has time to upgrade the crypto in the C version :) )
+**NB!** this is **NOT** on-wire compatible with original C version due to different cryptographic algorithms! eg. You will have to use gsocket-go to connect gsocket-go, you cannot mix original gsocket with gsocket-go.
+(At least until @SkyperTHC has time to upgrade the crypto in the C version :) )
 
 ## Differences from the original C implementation
 
