@@ -15,15 +15,18 @@ Pure Go implementation of the [Global Socket Toolkit](https://github.com/hackers
 - **SOCKS5 / TOR support** — route through TOR for anonymity
 - **Single binary** — `go build` produces one static executable
 
+**NB!** - this is **NOT** on-wire compatible with original C version due to different cryptographic algorithms! eg. You will have to use gsocket-go to connect gsocket-go, you cannot mix original gsocket with gsocket-go.
+(At least until @@SkyperTHC has time to upgrade the crypto in the C version :) )
+
 ## Differences from the original C implementation
 
-| | C (gsocket) | Go (gsocket-go) |
-|---|---|---|
-| Encryption | TLS-SRP (RFC 5054) + AES-256-CBC | CPace (RFC 9383) over X25519 + AES-256-GCM |
-| Key exchange | SRP with 4096-bit prime | Ephemeral X25519 + HKDF |
-| Build | autotools, OpenSSL dep | `go build`, zero C deps |
-| Windows | Cygwin only | Native (no DLLs needed) |
-| Interop with C clients | ✅ | ❌ (different crypto, same GSRN) |
+|                        | C (gsocket)                      | Go (gsocket-go)                            |
+| ---------------------- | -------------------------------- | ------------------------------------------ |
+| Encryption             | TLS-SRP (RFC 5054) + AES-256-CBC | CPace (RFC 9383) over X25519 + AES-256-GCM |
+| Key exchange           | SRP with 4096-bit prime          | Ephemeral X25519 + HKDF                    |
+| Build                  | autotools, OpenSSL dep           | `go build`, zero C deps                    |
+| Windows                | Cygwin only                      | Native (no DLLs needed)                    |
+| Interop with C clients | ✅                               | ❌ (different crypto, same GSRN)           |
 
 Go and C clients can coexist on the same GSRN but cannot talk directly to each other — they use different encryption protocols on top of the same relay.
 
@@ -60,11 +63,13 @@ GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o gs-netcat-darwin ./cmd/gs-
 ### Interactive shell
 
 **Server** (behind NAT, listens for connections):
+
 ```bash
 gs-netcat -l -i -s MySecret
 ```
 
 **Client** (anywhere, connects to server):
+
 ```bash
 gs-netcat -i -s MySecret
 ```
@@ -81,16 +86,19 @@ only connect to peers you trust to run commands as the server user.
 ### TCP forwarding
 
 **Server** (expose port 22 through GSRN):
+
 ```bash
 gs-netcat -l -d 127.0.0.1:22 -s MySecret
 ```
 
 **Client** (listen locally on port 2222, forwarded to server's port 22):
+
 ```bash
 gs-netcat -p 2222 -s MySecret
 ```
 
 Then on the client machine:
+
 ```bash
 ssh -p 2222 root@127.0.0.1
 ```
